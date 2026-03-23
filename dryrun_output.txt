@@ -1,0 +1,54 @@
+2026-03-07 21:52:09,604 | WARNING  | Hit safety limit of 50,000 records for incident - stopping fetch
+2026-03-07 21:52:35,617 | WARNING  | Hit safety limit of 50,000 records for sc_task - stopping fetch
+C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\openpyxl\styles\stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-03-07 21:52:43,574 | WARNING  | 'ESOL Replacement Tracker' sheet not found in C:\EMEA_GOV\Data\EUC_EOSL.xlsx
+2026-03-07 21:52:43,576 | ERROR    | Error reading EUC file: 'charmap' codec can't encode character '\u26a0' in position 2: character maps to <undefined>
+
+============================================================
+EMEA Governance Cockpit — Weekly Refresh
+MODE: DRY RUN (cockpit will NOT be updated)
+Run: 2026-03-07 21:51
+============================================================
+
+Reading previous cockpit values...
+
+Querying SNOW REST API...
+  Fetching open incidents...
+  WARNING: Fetched 50,000+ records from incident - site filter may not be working
+  Fetching MI history (60 days)...
+  Fetching open catalogue tasks...
+  WARNING: Fetched 50,000+ records from sc_task - site filter may not be working
+  Fetching open problems...
+
+  Incidents (open):    50000 records
+  MI history (60d):       68 records
+  Catalogue tasks:     50000 records
+  Problems:            10393 records
+
+Reading EUC/EOSL device replacement data...
+  Reading EUC/EOSL data from Power BI export...
+Traceback (most recent call last):
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 323, in fetch_euc_assets
+    print(f"  \u26a0 Expected sheet 'ESOL Replacement Tracker' not found - skipping Physics Block 1")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u26a0' in position 2: character maps to <undefined>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 1055, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 957, in main
+    euc_df = fetch_euc_assets(EUC_PATH)
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 386, in fetch_euc_assets
+    print(f"  \u26a0 Error reading EUC/EOSL file: {str(e)}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u26a0' in position 2: character maps to <undefined>

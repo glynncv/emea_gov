@@ -1,0 +1,48 @@
+2026-03-08 01:05:09,692 | WARNING  | Hit safety limit of 50,000 records for incident - stopping fetch
+2026-03-08 01:05:50,541 | WARNING  | Hit safety limit of 50,000 records for sc_task - stopping fetch
+C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\openpyxl\styles\stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-03-08 01:06:08,718 | WARNING  | No EUC/EOSL data found in C:\EMEA_GOV\Data\EUC_EOSL.xlsx
+
+============================================================
+EMEA Governance Cockpit — Weekly Refresh
+MODE: DRY RUN (cockpit will NOT be updated)
+Run: 2026-03-08 01:03
+============================================================
+
+Reading previous cockpit values...
+
+Querying SNOW REST API...
+  Fetching open incidents...
+  WARNING: Fetched 50,000+ records from incident - site filter may not be working
+    Filtered 50000 -> 3322 incidents (EMEA sites only)
+  Fetching MI history (60 days)...
+  Fetching open catalogue tasks...
+  WARNING: Fetched 50,000+ records from sc_task - site filter may not be working
+  Fetching open problems...
+
+  Incidents (open):     3322 records
+  MI history (60d):       19 records
+  Catalogue tasks:         0 records
+  Problems:              927 records
+
+Reading EUC/EOSL device replacement data...
+  Reading EUC/EOSL data from Power BI export...
+  WARNING: No device replacement data found in EUC file
+
+Validating site coverage...
+  WARNING:  MISSING from data: ['Dubai - United Arab Emirates', 'Istanbul - Turkey', 'Warsaw (Delphi Academy) - Poland']
+     Check SNOW site filter — these sites returned no records
+
+Calculating metrics...
+Traceback (most recent call last):
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 1111, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 1070, in main
+    print(f"\n{'\u2500'*60}")
+    ~~~~~^^^^^^^^^^^^^^^
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 2-61: character maps to <undefined>

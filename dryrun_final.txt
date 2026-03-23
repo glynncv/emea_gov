@@ -1,0 +1,63 @@
+2026-03-07 23:04:07,383 | WARNING  | Hit safety limit of 50,000 records for incident - stopping fetch
+2026-03-07 23:04:34,424 | WARNING  | Hit safety limit of 50,000 records for sc_task - stopping fetch
+C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\openpyxl\styles\stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-03-07 23:04:47,768 | WARNING  | No EUC/EOSL data found in C:\EMEA_GOV\Data\EUC_EOSL.xlsx
+
+============================================================
+EMEA Governance Cockpit — Weekly Refresh
+MODE: DRY RUN (cockpit will NOT be updated)
+Run: 2026-03-07 23:03
+============================================================
+
+Reading previous cockpit values...
+
+Querying SNOW REST API...
+  Fetching open incidents...
+  WARNING: Fetched 50,000+ records from incident - site filter may not be working
+  Fetching MI history (60 days)...
+  Fetching open catalogue tasks...
+  WARNING: Fetched 50,000+ records from sc_task - site filter may not be working
+  Fetching open problems...
+
+  Incidents (open):    50000 records
+  MI history (60d):       68 records
+  Catalogue tasks:     50000 records
+  Problems:            10393 records
+
+Reading EUC/EOSL device replacement data...
+  Reading EUC/EOSL data from Power BI export...
+  WARNING: No device replacement data found in EUC file
+
+Validating site coverage...
+  WARNING:  MISSING from data: ['Amal - Sweden', 'Belval - Luxembourg', 'Blois - France', 'Blonie - Poland', 'Bucharest - Romania', 'Cergy - France', 'Cinisello - Italy', 'Dubai - United Arab Emirates', 'Duesseldorf - Germany', 'Gillingham - United Kingdom', 'Hartridge - United Kingdom', 'Iasi - Romania', 'Istanbul - Turkey', 'Izmir - Turkey / ESBAS 2 (PT Phase 1)', 'Izmir - Turkey / ESBAS 3 (PT Phase 2)', 'Krakow - Poland', 'Madrid - Spain', 'Rzeszow - Poland', 'Stonehouse - United Kingdom', 'Technical Center Krakow', 'Warsaw (Delphi Academy) - Poland', 'Warsaw - Poland', 'Warwick (Titan) - United Kingdom', 'Warwick - United Kingdom', 'Wroclaw - Poland']
+     Check SNOW site filter — these sites returned no records
+
+Calculating metrics...
+Traceback (most recent call last):
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\indexes\base.py", line 3812, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'u_site_name'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 1057, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 972, in main
+    "no_movement":     calc_m4_no_movement(incidents, tasks),
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py", line 472, in calc_m4_no_movement
+    for site, cnt in stale["u_site_name"].value_counts().items():
+                     ~~~~~^^^^^^^^^^^^^^^
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 4107, in __getitem__
+    indexer = self.columns.get_loc(key)
+  File "C:\Users\cglynn\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\indexes\base.py", line 3819, in get_loc
+    raise KeyError(key) from err
+KeyError: 'u_site_name'

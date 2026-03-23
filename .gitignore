@@ -1,0 +1,26 @@
+# Environment variables - contains credentials
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# SNOW/OneDrive export data (regenerated each refresh)
+SNOW_Exports/
+
+# Excel temp files
+~$*.xlsx
