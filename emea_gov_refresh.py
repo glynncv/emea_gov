@@ -1,9 +1,11 @@
 """
 EMEA Governance Cockpit 2026 — SNOW REST API Refresh Script
-Version: v2
+Version: v3
 Owner: EMEA SDM (Colman)
 Purpose: Query SNOW REST API, calculate Operations Panel metrics,
          update Physics Engine trends, write results to cockpit Excel file.
+         Open incidents and MI history use batch-by-site queries (location.u_site_name
+         per EMEA site) because this SNOW instance ignores broader location filters on incident.
 
 Dependencies:
     pip install requests openpyxl pandas python-dotenv
@@ -387,51 +389,90 @@ def fetch_emea_sites() -> dict:
 # ---------------------------------------------
 
 def fetch_incidents() -> pd.DataFrame:
-    """Open incidents for all EMEA sites.
-    location.nameIN and location.u_site_name do NOT work on incident table — filtered in Python.
+    """Open incidents for all EMEA sites — batch-by-site.
+
+    SNOW incident table ignores server-side location filters (nameIN, u_region).
+    Querying one site at a time using location.u_site_name=<site> is the only
+    reliable approach. Runs one query per EMEA site and concatenates results.
     Excludes LogicMonitor/Integration caller (monitoring/event tickets).
     """
-    query = f"stateNOT IN6,7^caller_id!={CALLER_EXCLUDE_SYS_ID}"  # 6=Resolved, 7=Closed
     fields = [
         "number", "location.u_site_name", "priority",
         "opened_at", "sys_updated_on",
         "sla_target", "cmdb_ci", "problem_id",
         "state", "short_description"
     ]
-    print("  Fetching open incidents...")
-    df = snow_query("incident", query, fields)
+    print(f"  Fetching open incidents (batch-by-site, {len(EMEA_SITES)} sites)...")
+    dfs = []
+    for i, site in enumerate(EMEA_SITES, 1):
+        query = (
+            f"location.u_site_name={site}"
+            f"^stateNOT IN6,7"
+            f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+        )
+        print(f"    [{i:>2}/{len(EMEA_SITES)}] {site[:45]}", end=" ", flush=True)
+        df_site = snow_query("incident", query, fields)
+        print(f"— {len(df_site)} records", flush=True)
+        dfs.append(df_site)
+
+    if not dfs or all(d.empty for d in dfs):
+        logger.warning("fetch_incidents: no records returned for any EMEA site")
+        return pd.DataFrame()
+
+    df = pd.concat(dfs, ignore_index=True)
 
     if "location.u_site_name" in df.columns:
         df = df.rename(columns={"location.u_site_name": "location"})
 
-    if not df.empty and "location" in df.columns:
-        pre = len(df)
+    if "location" in df.columns:
         df = df[df["location"].isin(EMEA_SITES)]
-        print(f"    Filtered {pre} -> {len(df)} incidents (EMEA sites only, excl. LogicMonitor)")
 
+    print(f"    Total open incidents: {len(df)}")
+    logger.info(f"fetch_incidents complete — {len(df)} records across {len(EMEA_SITES)} sites")
     return df
 
 
 def fetch_major_incident_history() -> pd.DataFrame:
-    """P1/P2 incidents (open or closed) in the past 60 days — for repeat MI check.
+    """P1/P2 incidents (open or closed) in the past 60 days — batch-by-site.
+
+    Used for repeat MI check (calc_m5). Same batch-by-site approach as
+    fetch_incidents() — SNOW location filters are ignored on incident table.
     Excludes LogicMonitor/Integration caller.
     """
     since = (TODAY - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
-    query = f"priorityIN1,2^opened_at>={since}^caller_id!={CALLER_EXCLUDE_SYS_ID}"
     fields = [
         "number", "location.u_site_name", "priority",
         "opened_at", "resolved_at", "closed_at",
         "cmdb_ci", "problem_id", "state", "short_description"
     ]
-    print("  Fetching MI history (60 days)...")
-    df = snow_query("incident", query, fields)
+    print(f"  Fetching MI history — 60 days (batch-by-site, {len(EMEA_SITES)} sites)...")
+    dfs = []
+    for i, site in enumerate(EMEA_SITES, 1):
+        query = (
+            f"location.u_site_name={site}"
+            f"^priorityIN1,2"
+            f"^opened_at>={since}"
+            f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+        )
+        print(f"    [{i:>2}/{len(EMEA_SITES)}] {site[:45]}", end=" ", flush=True)
+        df_site = snow_query("incident", query, fields)
+        print(f"— {len(df_site)} records", flush=True)
+        dfs.append(df_site)
+
+    if not dfs or all(d.empty for d in dfs):
+        logger.warning("fetch_major_incident_history: no records returned for any EMEA site")
+        return pd.DataFrame()
+
+    df = pd.concat(dfs, ignore_index=True)
 
     if "location.u_site_name" in df.columns:
         df = df.rename(columns={"location.u_site_name": "location"})
 
-    if not df.empty and "location" in df.columns:
+    if "location" in df.columns:
         df = df[df["location"].isin(EMEA_SITES)]
 
+    print(f"    Total MI history records: {len(df)}")
+    logger.info(f"fetch_major_incident_history complete — {len(df)} records")
     return df
 
 
@@ -606,6 +647,14 @@ def test_incident_fetch(limit: int = 1000, batch_sites: int = 3) -> None:
     limit: Max records per query for quicker tests (default 1000). Use 50000 for full run.
     batch_sites: Number of sites to test for batch-by-site (default 3).
     """
+    global EMEA_SITES, EMEA_LOCATION_FILTER
+    if not EMEA_SITES:
+        print("  Initialising EMEA site list for test...")
+        sites = fetch_emea_sites()
+        EMEA_SITES = sites["site_names"]
+        EMEA_LOCATION_FILTER = "location.nameIN" + sites["location_ids"]
+        print(f"  {sites['count']} EMEA sites loaded (source: {sites['source']})\n")
+
     incident_fields = [
         "number", "location.u_site_name", "priority",
         "opened_at", "sys_updated_on", "caller_id", "contact_type", "incident_state",
