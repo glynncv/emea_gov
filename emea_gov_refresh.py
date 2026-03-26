@@ -1,6 +1,6 @@
 """
 EMEA Governance Cockpit 2026 — SNOW REST API Refresh Script
-Version: v3
+Version: v5
 Owner: EMEA SDM (Colman)
 Purpose: Query SNOW REST API, calculate Operations Panel metrics,
          update Physics Engine trends, write results to cockpit Excel file.
@@ -44,7 +44,7 @@ load_dotenv()
 # ---------------------------------------------
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "refresh.log")
+LOG_FILE = os.path.join(LOG_DIR, "refresh_log.txt")
 
 logger = logging.getLogger("emea_gov_refresh")
 logger.setLevel(logging.INFO)
@@ -56,6 +56,8 @@ file_handler = TimedRotatingFileHandler(
     interval=1,
     backupCount=8
 )
+file_handler.suffix = "_%Y-%m-%d.txt"
+file_handler.namer = lambda name: name.replace(".txt_", "_")
 file_handler.setLevel(logging.INFO)
 
 # Console handler
@@ -78,7 +80,7 @@ logger.addHandler(console_handler)
 # SNOW_USER=your_username
 # SNOW_PASS=your_password
 # COCKPIT_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Cockpit\EMEA_Governance_Cockpit_2026.xlsx
-# EUC_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Data\EUC_EOSL.xlsx
+# EUC_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\EUC_EOSL.xlsx
 # SNOW_LOCATIONS_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\SNOW_Exports\Current\PYTHON_EMEA_Locations.csv
 #   (optional — only needed to override the default fallback path)
 
@@ -113,6 +115,7 @@ SLA_DEFAULTS = {"1": 4, "2": 8, "3": 72, "4": 336}
 
 # Non-physical / cloud / external entries to exclude from all site lists.
 # These appear in the SNOW cmn_location EMEA region but are not physical governance sites.
+# Blonie — manufacturing site closed (Mar 2026); may remain u_active in cmn_location.
 LOCATION_EXCLUSIONS = [
     "Azure Europe West",
     "PHINIA Azure West Europe",
@@ -120,6 +123,8 @@ LOCATION_EXCLUSIONS = [
     "DXC Service Desk Budapest",
     "Abingdon - Cannon External Company",
     "Amsterdam Data Center NEW",
+    "Amsterdam CoLocation",
+    "Blonie - Poland",
 ]
 
 # EMEA physical site lists — populated at runtime by fetch_emea_sites() in main().
@@ -395,6 +400,7 @@ def fetch_incidents() -> pd.DataFrame:
     Querying one site at a time using location.u_site_name=<site> is the only
     reliable approach. Runs one query per EMEA site and concatenates results.
     Excludes LogicMonitor/Integration caller (monitoring/event tickets).
+    Date filter: last 12 months (opened_at >= 365 days ago). Adjust timedelta if needed.
     """
     fields = [
         "number", "location.u_site_name", "priority",
@@ -402,12 +408,15 @@ def fetch_incidents() -> pd.DataFrame:
         "sla_target", "cmdb_ci", "problem_id",
         "state", "short_description"
     ]
+    since_1yr = (TODAY - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
     print(f"  Fetching open incidents (batch-by-site, {len(EMEA_SITES)} sites)...")
     dfs = []
     for i, site in enumerate(EMEA_SITES, 1):
+        # 6=Resolved, 7=Closed, 8=Autoclosed
         query = (
             f"location.u_site_name={site}"
-            f"^stateNOT IN6,7"
+            f"^stateNOT IN6,7,8"
+            f"^opened_at>={since_1yr}"
             f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
         )
         print(f"    [{i:>2}/{len(EMEA_SITES)}] {site[:45]}", end=" ", flush=True)
@@ -672,10 +681,10 @@ def test_incident_fetch(limit: int = 1000, batch_sites: int = 3) -> None:
         return df
 
     strategies = [
-        ("Current (state only)", "stateNOT IN6,7"),
-        ("+ caller exclude", f"stateNOT IN6,7^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
-        ("+ location.nameIN", f"{EMEA_LOCATION_FILTER}^stateNOT IN6,7^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
-        ("+ location.u_region=EMEA", f"location.u_region=EMEA^stateNOT IN6,7^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
+        ("Current (state only)", "stateNOT IN6,7,8"),
+        ("+ caller exclude", f"stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
+        ("+ location.nameIN", f"{EMEA_LOCATION_FILTER}^stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
+        ("+ location.u_region=EMEA", f"location.u_region=EMEA^stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"),
     ]
 
     print(f"\n{'='*60}")
@@ -704,7 +713,7 @@ def test_incident_fetch(limit: int = 1000, batch_sites: int = 3) -> None:
         dfs = []
         for j, site in enumerate(EMEA_SITES[:batch_sites], 1):
             print(f"    Site {j}/{batch_sites}: {site[:40]}...", end=" ", flush=True)
-            q = f"location.u_site_name={site}^stateNOT IN6,7^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+            q = f"location.u_site_name={site}^stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"
             d = snow_query("incident", q, incident_fields, limit=limit)
             print(f"{len(d):,} records", flush=True)
             if not d.empty and loc_col in d.columns:
@@ -1152,33 +1161,94 @@ def shift_physics_trends(ws_physics, row: int, new_value: float):
 
 def update_enterprise_panel_euc(ws_enterprise, euc_metrics: dict):
     """
-    Write EUC/EOSL physics summary to the Enterprise_Panel sheet.
-    Targets the row labelled '... Physics: EUC Burn' in column A.
-    Writes: C = Units Remaining, E = Required Weekly Burn, G = Physics Status.
-    Does NOT create the row if missing — logs a warning instead.
+    Write EUC stream 1 (Tech Refresh) to Enterprise_Panel row 4 — fixed layout (25 Mar 2026).
+    C4 remaining units (int), E4 weeks to 31 Dec 2026, F4 required weekly burn, H4 physics status.
+    G4 is manual (Actual 4W Rolling Burn) — read only, never overwritten.
     """
-    target_row = None
-    for row in ws_enterprise.iter_rows():
-        cell_a = row[0]
-        if cell_a.value and "EUC Burn" in str(cell_a.value):
-            target_row = cell_a.row
-            break
+    # Stream 1 fixed refs — no label row search
+    CELL_UNITS_REMAINING = "C4"
+    CELL_WEEKS_REMAINING = "E4"
+    CELL_REQUIRED_BURN = "F4"
+    CELL_ACTUAL_BURN = "G4"  # read-only
+    CELL_PHYSICS_STATUS = "H4"
 
-    if target_row is None:
-        logger.warning("Enterprise_Panel: 'Physics: EUC Burn' row not found — skipping update")
-        print("  WARNING: Enterprise_Panel EUC Burn row not found — use Build Pack Prompt 12 to create it")
+    units_remaining = int(euc_metrics.get("remaining", 0) or 0)
+
+    end_date = datetime(2026, 12, 31, tzinfo=timezone.utc).date()
+    today_date = TODAY.date()
+    days_to_end = (end_date - today_date).days
+    weeks_remaining = round(days_to_end / 7, 1)
+
+    if weeks_remaining and weeks_remaining > 0:
+        required_burn = round(units_remaining / weeks_remaining, 1)
+    else:
+        required_burn = 0.0
+
+    raw_actual = ws_enterprise[CELL_ACTUAL_BURN].value
+    try:
+        actual_burn = float(raw_actual) if raw_actual is not None and str(raw_actual).strip() != "" else 0.0
+    except (TypeError, ValueError):
+        actual_burn = 0.0
+
+    if actual_burn >= required_burn:
+        physics_status = "ON TRAJECTORY"
+    elif actual_burn >= required_burn * 0.8:
+        physics_status = "WATCH"
+    else:
+        physics_status = "BREACHED"
+
+    ws_enterprise[CELL_UNITS_REMAINING].value = units_remaining
+    ws_enterprise[CELL_WEEKS_REMAINING].value = weeks_remaining
+    ws_enterprise[CELL_REQUIRED_BURN].value = required_burn
+    ws_enterprise[CELL_PHYSICS_STATUS].value = physics_status
+
+    logger.info(
+        f"Enterprise_Panel EUC (row 4): remaining={units_remaining}, weeks={weeks_remaining}, "
+        f"required_burn={required_burn}, actual_burn={actual_burn}, status={physics_status}"
+    )
+
+
+def save_enterprise_panel_euc_after_cockpit(cockpit_path: str, euc_metrics: dict | None) -> None:
+    """
+    Second pass on the cockpit workbook: Enterprise_Panel EUC row 4 only.
+    If EUC_EOSL source file is missing, print a warning and return without raising.
+    """
+    if not os.path.exists(EUC_PATH):
+        print(f"  WARNING: EUC_EOSL.xlsx not found ({EUC_PATH}) — skipping Enterprise_Panel EUC update")
+        logger.warning(f"Enterprise_Panel EUC skipped — EUC file not found: {EUC_PATH}")
+        return
+    if euc_metrics is None:
+        return
+    try:
+        wb = openpyxl.load_workbook(cockpit_path)
+    except FileNotFoundError:
+        print(f"  WARNING: Cockpit not found for Enterprise_Panel pass — {cockpit_path}")
+        logger.warning(f"Enterprise_Panel EUC skipped — cockpit missing: {cockpit_path}")
+        return
+    except PermissionError:
+        print(f"  WARNING: Cockpit open — could not update Enterprise_Panel EUC ({cockpit_path})")
+        logger.warning(f"Enterprise_Panel EUC skipped — permission denied: {cockpit_path}")
+        return
+    except Exception as e:
+        print(f"  WARNING: Could not load cockpit for Enterprise_Panel EUC: {e}")
+        logger.warning(f"Enterprise_Panel EUC skipped — load error: {e}")
         return
 
-    remaining = euc_metrics.get("remaining", 0)
-    burn      = euc_metrics.get("required_weekly_burn", 0)
-    overdue   = euc_metrics.get("overdue", 0)
-    status    = "At Risk" if overdue > 0 else "On Trajectory"
+    if "Enterprise_Panel" not in wb.sheetnames:
+        print("  WARNING: Enterprise_Panel sheet missing — skipping EUC row update")
+        logger.warning("Enterprise_Panel EUC skipped — sheet not in workbook")
+        return
 
-    ws_enterprise.cell(row=target_row, column=3).value = remaining  # C = Units Remaining
-    ws_enterprise.cell(row=target_row, column=5).value = burn        # E = Required Weekly Burn
-    ws_enterprise.cell(row=target_row, column=7).value = status      # G = Physics Status
-
-    logger.info(f"Enterprise_Panel EUC Burn updated: remaining={remaining}, burn={burn}, status={status}")
+    try:
+        update_enterprise_panel_euc(wb["Enterprise_Panel"], euc_metrics)
+        wb.save(cockpit_path)
+        logger.info(f"Enterprise_Panel EUC saved to {cockpit_path}")
+    except PermissionError:
+        print(f"  WARNING: Cannot save cockpit after Enterprise_Panel EUC update — file may be open")
+        logger.warning(f"Enterprise_Panel EUC save failed — permission denied: {cockpit_path}")
+    except Exception as e:
+        print(f"  WARNING: Enterprise_Panel EUC update/save failed: {e}")
+        logger.warning(f"Enterprise_Panel EUC save error: {e}")
 
 
 def update_physics_block1(ws_physics, euc_metrics: dict):
@@ -1193,7 +1263,6 @@ def update_physics_block1(ws_physics, euc_metrics: dict):
         "remaining":             "B5",   # Units Remaining
         "weeks_remaining":       "B6",   # Weeks to 31 Dec 2026
         "required_weekly_burn":  "B7",   # Required Weekly Burn
-        "q4_adjusted_burn":      "B13",  # Effective Capacity (Seasonal Stress Test)
     }
 
     try:
@@ -1203,7 +1272,6 @@ def update_physics_block1(ws_physics, euc_metrics: dict):
         ws_physics[BLOCK1_CELLS["remaining"]].value = euc_metrics.get("remaining")
         ws_physics[BLOCK1_CELLS["weeks_remaining"]].value = euc_metrics.get("weeks_remaining")
         ws_physics[BLOCK1_CELLS["required_weekly_burn"]].value = euc_metrics.get("required_weekly_burn")
-        ws_physics[BLOCK1_CELLS["q4_adjusted_burn"]].value = euc_metrics.get("q4_adjusted_burn")
 
         logger.info(f"Physics Block 1 updated - Total: {euc_metrics.get('total_units')}, "
                    f"Remaining: {euc_metrics.get('remaining')}, "
@@ -1250,11 +1318,136 @@ ESCALATION_OWNER_MAP = {
     "problems_no_rca":  "IT Ops Managers — per site grouping",
 }
 
+ESCALATION_RECIPIENTS = {
+    "incident_aging":  "IT Ops Managers — Proyer, Damon / Cazan, Anca / Gauthier, Guillaume / S K, Arif / Glynn, Colman",
+    "catalogue_aging": "IT Ops Managers — Proyer, Damon / Cazan, Anca / Gauthier, Guillaume / S K, Arif / Glynn, Colman",
+    "sla_x2":          "IT Ops Managers — Proyer, Damon / Cazan, Anca / Gauthier, Guillaume / S K, Arif / Glynn, Colman",
+    "no_movement":     "IT Ops Managers — Proyer, Damon / Cazan, Anca / Gauthier, Guillaume / S K, Arif / Glynn, Colman",
+    "repeat_mi":       "IT Ops Managers — per site grouping (identify from Trigger_Log note)",
+    "problems_no_rca": "IT Ops Managers — per site grouping",
+}
+
+ESCALATION_SUBJECTS = {
+    "incident_aging":  "BREACHED — Incident Aging — Recovery Commitment Required",
+    "catalogue_aging": "BREACHED — Catalogue Aging — Recovery Commitment Required",
+    "sla_x2":          "BREACHED — SLA x2 Violations — Recovery Commitment Required",
+    "no_movement":     "WATCH — Stagnant Tickets — Recovery Commitment Required",
+    "repeat_mi":       "WATCH — Repeat Major Incidents — Recovery Commitment Required",
+    "problems_no_rca": "BREACHED — Problems Without RCA — Recovery Commitment Required",
+}
+
+
+def generate_escalation_body(metric_name: str, status: str, value, note: str, run_date) -> str:
+    """Generate a 3-sentence escalation email body from signal data."""
+    rule_id = RULE_ID_MAP.get(metric_name, metric_name.upper())
+    next_monday = run_date + timedelta(days=(7 - run_date.weekday()))
+    next_monday_str = next_monday.strftime("%d %b %Y")
+    line1 = f"{rule_id} {status}: {note}."
+    line2 = (f"If unresolved by next weekly run ({next_monday_str}), escalation advances "
+             f"to EMEA IT Director with formal recovery plan demand.")
+    line3 = ("Recovery commitment required: (1) accountable owner (named individual), "
+             "(2) committed completion date, (3) throughput commitment, "
+             "(4) next checkpoint date.")
+    return f"{line1}\n{line2}\n{line3}"
+
+
+def write_escalation_emails(wb, summary: list, run_date) -> None:
+    """
+    Clear and rewrite Escalation_Emails sheet — one block per WATCH/BREACHED metric.
+    Called inside update_cockpit() before wb.save() to ensure single save.
+    """
+    if "Escalation_Emails" not in wb.sheetnames:
+        logger.warning("Escalation_Emails sheet not found — skipping email generation")
+        return
+
+    ws = wb["Escalation_Emails"]
+
+    # Clear all content from row 2 downward (preserve row 1 headers)
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.value = None
+
+    active = [e for e in summary if e["status"] in ("WATCH", "BREACHED")]
+
+    if not active:
+        ws.cell(row=2, column=1).value = "Status"
+        ws.cell(row=2, column=2).value = (
+            f"All metrics GREEN — no escalation required — {run_date.strftime('%d %b %Y')}"
+        )
+        return
+
+    run_date_str = run_date.strftime("%d %b %Y")
+    current_row = 2
+
+    for n, entry in enumerate(active, start=1):
+        key     = entry["metric"]
+        status  = entry["status"]
+        value   = entry["value"]
+        note    = entry.get("note", "")
+        display = METRIC_DISPLAY_NAMES.get(key, key)
+        rule_id = RULE_ID_MAP.get(key, key.upper())
+        subject = f"{ESCALATION_SUBJECTS.get(key, f'{status} — {display} — Recovery Commitment Required')} — {run_date_str}"
+        body    = generate_escalation_body(key, status, value, note, run_date)
+
+        ws.cell(row=current_row, column=1).value = f"EMAIL {n}"
+        ws.cell(row=current_row, column=2).value = f"{display} — {rule_id}"
+        current_row += 1
+
+        ws.cell(row=current_row, column=1).value = "To:"
+        ws.cell(row=current_row, column=2).value = ESCALATION_RECIPIENTS.get(key, "")
+        current_row += 1
+
+        ws.cell(row=current_row, column=1).value = "Subject:"
+        ws.cell(row=current_row, column=2).value = subject
+        current_row += 1
+
+        ws.cell(row=current_row, column=1).value = "Body:"
+        body_cell = ws.cell(row=current_row, column=2)
+        body_cell.value = body
+        body_cell.alignment = openpyxl.styles.Alignment(wrap_text=True)
+        current_row += 1
+
+        current_row += 1  # blank row between blocks
+
+    logger.info(f"Escalation_Emails updated — {len(active)} email(s) written")
+
+
+def _trigger_log_first_auto_generated_row(ws):
+    """
+    First 1-based row where column A contains AUTO-GENERATED (manual vs formula block).
+    Returns None if the marker is absent.
+    """
+    for row_idx in range(3, ws.max_row + 2):
+        a_val = ws.cell(row=row_idx, column=1).value
+        if a_val is not None and "AUTO-GENERATED" in str(a_val).upper():
+            return row_idx
+    return None
+
+
+def _trigger_log_has_open_metric(ws, display: str, stop_row: int) -> bool:
+    """
+    True if any row in [3, stop_row) has column C matching display and H == Open.
+    stop_row is exclusive (e.g. first AUTO-GENERATED row).
+    """
+    want = str(display).strip()
+    for row_idx in range(3, stop_row):
+        c_val = ws.cell(row=row_idx, column=3).value
+        h_val = ws.cell(row=row_idx, column=8).value
+        if c_val is None or h_val is None:
+            continue
+        if str(c_val).strip() != want:
+            continue
+        if str(h_val).strip().casefold() == "open":
+            return True
+    return False
+
 
 def write_trigger_log(wb, results_summary: list):
     """
     Append BREACHED metric entries to the Trigger_Log sheet.
-    Skips duplicates (same date + same metric already logged today).
+    Skips when an Open row already exists for the same metric (manual section only,
+    rows before column A contains AUTO-GENERATED). Also skips same date + same
+    metric already logged today.
     Column order: A=Date, B=Domain, C=Metric, D=Trigger Type,
                   E=Threshold, F=Escalated To, G=Action, H=Status, I=Closure Date
     """
@@ -1272,6 +1465,9 @@ def write_trigger_log(wb, results_summary: list):
         if ws.cell(row=row_idx, column=1).value is None:
             first_empty = row_idx
             break
+
+    auto_row = _trigger_log_first_auto_generated_row(ws)
+    open_scan_stop = auto_row if auto_row is not None else first_empty
 
     # Collect existing entries for today to prevent duplicates
     existing_today = set()
@@ -1293,6 +1489,10 @@ def write_trigger_log(wb, results_summary: list):
 
         metric  = entry["metric"]
         display = METRIC_DISPLAY_NAMES.get(metric, metric)
+
+        if _trigger_log_has_open_metric(ws, display, open_scan_stop):
+            print(f"  Trigger_Log: {display} already Open — skipping duplicate entry")
+            continue
 
         if display in existing_today:
             logger.info(f"Trigger_Log: duplicate skipped for {display} on {today_str}")
@@ -1361,12 +1561,12 @@ def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
     #                           Escalation Required col, Physics Block 4 row)
     # Calibrated from EMEA_Governance_Cockpit_2026.xlsx on 2026-03-07
     ROW_MAP = {
-        "incident_aging":   {"cv": "D4",  "ts": "H4",  "er": "I4",  "phys_row": 44, "pct": True},
-        "catalogue_aging":  {"cv": "D5",  "ts": "H5",  "er": "I5",  "phys_row": 45, "pct": True},
-        "sla_x2":           {"cv": "D6",  "ts": "H6",  "er": "I6",  "phys_row": 46, "pct": False},
-        "no_movement":      {"cv": "D8",  "ts": "H8",  "er": "I8",  "phys_row": 47, "pct": False},
-        "repeat_mi":        {"cv": "D10", "ts": "H10", "er": "I10", "phys_row": 48, "pct": False},
-        "problems_no_rca":  {"cv": "D11", "ts": "H11", "er": "I11", "phys_row": 49, "pct": False},
+        "incident_aging":   {"cv": "B4",  "ts": "F4",  "er": "G4",  "phys_row": 2},
+        "catalogue_aging":  {"cv": "B5",  "ts": "F5",  "er": "G5",  "phys_row": 3},
+        "sla_x2":           {"cv": "B6",  "ts": "F6",  "er": "G6",  "phys_row": 4},
+        "no_movement":      {"cv": "B8",  "ts": "F8",  "er": "G8",  "phys_row": 5},
+        "repeat_mi":        {"cv": "B10", "ts": "F10", "er": "G10", "phys_row": 6},
+        "problems_no_rca":  {"cv": "B11", "ts": "F11", "er": "G11", "phys_row": 7},
     }
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1391,6 +1591,12 @@ def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
         # Trigger status
         prev_cv   = prev_values.get(key, {}).get("current")
         prev_4w   = prev_values.get(key, {}).get("avg_4w")
+        try:
+            prev_cv = float(prev_cv) if prev_cv is not None else None
+            prev_4w = float(prev_4w) if prev_4w is not None else None
+        except (ValueError, TypeError):
+            prev_cv = None
+            prev_4w = None
         status    = evaluate_trigger(
             key,
             current    = m.get("value"),
@@ -1422,14 +1628,15 @@ def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
             "note":   m.get("note", "")
         })
 
-    # Update Physics Block 1 and Enterprise_Panel EUC summary
+    # Update Physics Block 1 (Enterprise_Panel EUC row 4 is applied in main() after this save)
     if euc_metrics and euc_metrics.get("total_units", 0) > 0:
         update_physics_block1(ws_physics, euc_metrics)
-        ws_enterprise = wb["Enterprise_Panel"]
-        update_enterprise_panel_euc(ws_enterprise, euc_metrics)
 
     # Append BREACHED entries to Trigger_Log
     write_trigger_log(wb, results_summary)
+
+    # Rewrite Escalation_Emails (single save covers both)
+    write_escalation_emails(wb, results_summary, TODAY.date())
 
     try:
         wb.save(COCKPIT_PATH)
@@ -1462,13 +1669,13 @@ def read_prev_values() -> dict:
         wb = openpyxl.load_workbook(COCKPIT_PATH, data_only=True)
         ws = wb["Operations_Panel"]
         return {
-            "incident_aging":  {"current": ws["D4"].value,  "avg_4w": ws["E4"].value},
-            "catalogue_aging": {"current": ws["D5"].value,  "avg_4w": ws["E5"].value},
-            "sla_x2":          {"current": ws["D6"].value,  "avg_4w": ws["E6"].value},
-            "no_movement":     {"current": ws["D8"].value,  "avg_4w": ws["E8"].value},
-            "repeat_mi":       {"current": ws["D10"].value, "avg_4w": ws["E10"].value},
-            "problems_no_rca": {"current": ws["D11"].value, "avg_4w": ws["E11"].value},
-        }
+    "incident_aging":  {"current": ws["B4"].value,  "avg_4w": ws["C4"].value},
+    "catalogue_aging": {"current": ws["B5"].value,  "avg_4w": ws["C5"].value},
+    "sla_x2":          {"current": ws["B6"].value,  "avg_4w": ws["C6"].value},
+    "no_movement":     {"current": ws["B8"].value,  "avg_4w": ws["C8"].value},
+    "repeat_mi":       {"current": ws["B10"].value, "avg_4w": ws["C10"].value},
+    "problems_no_rca": {"current": ws["B11"].value, "avg_4w": ws["C11"].value},
+}
     except Exception:
         return {}
 
@@ -1622,6 +1829,12 @@ def main():
         for key, m in metrics.items():
             prev_cv   = prev_values.get(key, {}).get("current")
             prev_4w   = prev_values.get(key, {}).get("avg_4w")
+            try:
+                prev_cv = float(prev_cv) if prev_cv is not None else None
+                prev_4w = float(prev_4w) if prev_4w is not None else None
+            except (ValueError, TypeError):
+                prev_cv = None
+                prev_4w = None
             status    = evaluate_trigger(
                 key,
                 current    = m.get("value"),
@@ -1665,6 +1878,7 @@ def main():
     else:
         print(f"\nUpdating cockpit: {COCKPIT_PATH}")
         summary = update_cockpit(metrics, prev_values, euc_metrics)
+        save_enterprise_panel_euc_after_cockpit(COCKPIT_PATH, euc_metrics)
 
     # 6. Print summary
     print(f"\n{'-'*60}")

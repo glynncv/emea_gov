@@ -1,7 +1,8 @@
 # Cursor Handover — `emea_gov_refresh.py`
 *Project:* EMEA Governance Cockpit 2026
 *Owner:* Colman Glynn, EMEA SDM, PHINIA
-*Last updated:* 11 March 2026
+*Last updated:* 25 March 2026
+*Script version:* v5
 
 ---
 
@@ -30,8 +31,8 @@ pip install requests openpyxl pandas python-dotenv
 | Item | Path |
 |---|---|
 | Script | `C:\Users\cglynn\myPython\emea_gov\emea_gov_refresh.py` |
-| Cockpit | `C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Cockpit\EMEA_Governance_Cockpit_2026.xlsx` |
-| EUC source | `C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Data\EUC_EOSL.xlsx` |
+| Cockpit | `C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Cockpit\EMEA_Governance_Cockpit_2026.xlsx` |
+| EUC source | `C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\EUC_EOSL.xlsx` |
 | Logs | `C:\Users\cglynn\myPython\emea_gov\logs\refresh.log` |
 | Config | `.env` in script directory |
 
@@ -61,8 +62,8 @@ python emea_gov_refresh.py --dry-run
 | Function | Purpose |
 |---|---|
 | `snow_query()` | Core SNOW REST API fetch — handles pagination, flattens dot-walked fields, parses dates |
-| `fetch_incidents()` | Open incidents, Python EMEA filter; excludes LogicMonitor/Integration caller |
-| `fetch_major_incident_history()` | P1/P2 incidents (open + closed) in past 60 days; excludes LogicMonitor caller |
+| `fetch_incidents()` | Open incidents, all 24 EMEA sites — **batch-by-site** (one query per site). SNOW incident table ignores server-side location filters — batch approach is the only reliable method. |
+| `fetch_major_incident_history()` | P1/P2 incidents (open + closed) in past 60 days — **batch-by-site**, same pattern as `fetch_incidents()`. |
 | `fetch_catalogue_tasks()` | Open `sc_task` records for all 24 EMEA sites |
 | `fetch_problems()` | Open problems without RCA, all 24 EMEA sites |
 | `fetch_euc_assets()` | Reads `EUC_EOSL.xlsx` (Power BI export — **not SNOW**). Primary sheet: `ESOL Replacement Tracker`; fallback: `Export` |
@@ -134,7 +135,8 @@ Columns B/C/D/E = Wk1/Wk2/Wk3/Wk4. Each run shifts right and writes new value to
 - **Site filter field:** `location.u_site_name` (dot-walked — NOT `u_site_name` directly on the record)
 - **Catalogue task site field:** `request_item.u_opened_on_behalf_of.location` with numeric prefix strip  
   e.g. `10610 - Warwick - United Kingdom` → `Warwick - United Kingdom`
-- **`sc_task` limitation:** Does not populate `location.u_site_name` directly in PHINIA SNOW — this was the root cause of an earlier zero-data issue, now resolved via the above field path
+- **`sc_task` limitation:** Does not populate `location.u_site_name` directly in PHINIA SNOW — resolved via the above field path
+- **Incident table — CRITICAL:** Server-side location filters (`location.nameIN`, `location.u_region`, `location.u_site_name`) are ignored on the incident table in this PHINIA SNOW instance. All strategies tested (24 Mar 2026) returned Raw: 50,000 (HIT LIMIT). Root cause unknown — may be ACL, business rule, or missing index. SNOW admin request raised. **Workaround: batch-by-site — `location.u_site_name={site}` per query, 24 queries per run, ~3–4 min.** This works reliably. `sc_task` and `problem` tables are not affected.
 
 **24 EMEA sites in scope** (Blonie 10381 removed 08 Mar — site closed):
 
@@ -153,10 +155,6 @@ Warwick - United Kingdom
 **3 sites currently returning zero SNOW records** (correct — not a script issue):
 Dubai, Istanbul, Warsaw (Delphi Academy). Monitor — sanity check with site IT Ops Managers if still zero on 16 Mar run.
 
-**Incident exclusion (LogicMonitor/Integration):** Tickets with `caller_id=24f555b8c387f6d41edf787dc00131a6` are excluded (monitoring/event tickets). Added 11 Mar 2026.
-
-**Incident data volume:** Incident table does not respond to `location.nameIN` or `location.u_site_name` — batch-by-site tested 11 Mar, filter ignored (returned overlapping global data). Kept single-query + Python EMEA_SITES filter. Caller exclude reduces monitoring tickets.
-
 ---
 
 ## Open code tasks
@@ -165,13 +163,14 @@ Dubai, Istanbul, Warsaw (Delphi Academy). Monitor — sanity check with site IT 
 `update_physics_block1()` is writing correct values but also writing zeros to an adjacent column. Cell references need recalibrating. Correct target cells are B2–B7 on the Physics_Engine sheet.
 
 ### 2. Build Physics_Engine Blocks 2 and 3 — manual input cells
-- Block 2: SDWAN — yellow manual input cells. Total EMEA site count not yet confirmed (data gap).
-- Block 3: OT Remediation — yellow manual input cells. Per-site status not yet confirmed (data gap).
-
-These are manual-entry blocks. Script does not auto-populate them; structure needs to exist in the workbook for manual SDM input.
+- Block 2: SDWAN — yellow manual input cells. P2 pipeline now complete (18 sites, 10 Complete / 7 Pending / 1 Ready to Schedule). Enter confirmed count manually.
+- Block 3: OT Remediation — yellow manual input cells. P3 pipeline complete (28 EMEA rows). 2 null states resolved 24 Mar.
 
 ### 3. Trigger_Log sheet — verify auto-population
-`Trigger_Log` sheet was wired in Claude Code Prompt 13. Confirm duplicate guard is working correctly across runs (should not re-log the same breach in consecutive weeks without a state change).
+Confirm duplicate guard is working correctly across runs.
+
+### 4. SNOW admin request pending
+Request raised 24 Mar for investigation of incident table location filter issue and Scripted REST endpoints. If resolved, `fetch_incidents()` and `fetch_major_incident_history()` can revert to single-query — remove batch-by-site loop and restore original query string.
 
 ---
 
@@ -189,9 +188,35 @@ These are manual-entry blocks. Script does not auto-populate them; structure nee
 
 ---
 
-## Last two live run results
+## Last run results
 
-**Run 2 — 10 March 2026 16:10**
+**Run 3 — 25 March 2026 09:30 (first successful live write — v5)**
+
+| Metric | Value | Status |
+|---|---|---|
+| incident_aging | 9% (228/2,532) | BREACHED |
+| catalogue_aging | 0% (0/4,969) | BREACHED |
+| sla_x2 | 0 | GREEN |
+| no_movement | 2,130 | WATCH — Gillingham, Blois, Iasi top sites |
+| repeat_mi | 2 | WATCH — Iasi / SAP Console |
+| problems_no_rca | 7 | BREACHED — 3 over 60 days, 4 in watch band |
+
+2 BREACHED / 2 WATCH / 1 GREEN. Cockpit saved to `EMEA_Governance_Cockpit_2026.xlsx`.
+Istanbul and Warsaw (Delphi Academy) returned 0 incident records — confirmed data gap, not script issue.
+Task Scheduler next run: Monday 30 March 08:00.
+
+**Dry-run — 24 March 2026 15:26 (CSV mode — test data)**
+
+| Metric | Value | Status |
+|---|---|---|
+| incident_aging | 0.0% | WATCH (test data artifact) |
+| catalogue_aging | None | GREEN (no data in test CSV) |
+| sla_x2 | 0 | GREEN |
+| no_movement | 10 | WATCH |
+| repeat_mi | 0 | GREEN (no MI history in test CSV) |
+| problems_no_rca | 9 | BREACHED |
+
+**Run 2 — 10 March 2026 16:10 (last pre-v5 live run)**
 
 | Metric | Value | Status |
 |---|---|---|
@@ -202,15 +227,17 @@ These are manual-entry blocks. Script does not auto-populate them; structure nee
 | repeat_mi | 3 | BREACHED |
 | problems_no_rca | 152 | BREACHED |
 
-4 BREACHED / 1 WATCH / 1 GREEN. Escalation emails sent 10 Mar. Recovery commitments due by 16 Mar run.
+4 BREACHED / 1 WATCH / 1 GREEN. Escalation emails sent 10 Mar.
 
 ---
 
 ## Quick debug checklist
 
 - **No data returned for a metric?** — Check SNOW site filter string. Confirm `EMEA_SITES` list values match exact `u_site_name` strings in PHINIA SNOW.
+- **Incident fetch slow (~3-4 min)?** — Expected. Batch-by-site runs 24 queries. Normal until SNOW admin resolves incident table filter issue.
 - **Trigger status wrong?** — Check `evaluate_trigger()` for the metric. Confirm `prev_week` is being read correctly from `read_prev_values()` before the current run overwrites Wk1.
 - **Cell written to wrong row?** — Check `ROW_MAP` in `update_cockpit()` against actual workbook row numbers. Row numbers were calibrated in Claude Code Prompt 3 — re-run calibration if the workbook structure changes.
 - **Physics_Engine trend not shifting?** — Check `shift_physics_trends()` column letters (B/C/D/E) and the `phys_row` value in `ROW_MAP`.
 - **EUC data not loading?** — Confirm `EUC_EOSL.xlsx` exists at path from `.env`. Sheet name must be `ESOL Replacement Tracker` (or fallback `Export`).
 - **SSL error on SNOW call?** — Confirm `SNOW_VERIFY_SSL=false` is in `.env` and `requests.get()` is passing `verify=False`.
+- **Site count wrong?** — Check `LOCATION_EXCLUSIONS` in CONFIG. Expected count is 24. If higher, a non-physical location (cloud node, DC, external) needs adding to the exclusion list.

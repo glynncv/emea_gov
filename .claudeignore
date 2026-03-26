@@ -1,0 +1,39 @@
+# --- Dependencies (The biggest cost savers) ---
+node_modules/
+vendor/
+.venv/
+env/
+__pycache__/
+
+# --- Build Outputs (Claude doesn't need to read compiled code) ---
+dist/
+build/
+.next/
+out/
+target/
+*.exe
+*.dll
+*.so
+
+# --- Heavy Data & Media ---
+*.log
+*.csv
+*.jsonl
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.mp4
+*.pdf
+
+# --- Version Control & Hidden ---
+.git/
+.svn/
+.hg/
+.DS_Store
+
+# --- Secrets (Safety First) ---
+.env*
+*.pem
+*.key
