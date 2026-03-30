@@ -113,14 +113,14 @@ The `incident_aging` and `catalogue_aging` consecutive-week rule reads `prev_wee
 
 **Sheet: `Physics_Engine` — Block 4 trend rows**
 
-| Metric | Row |
+| Metric | Row (`phys_row` in `ROW_MAP` / Physics_Engine Block 4) |
 |---|---|
-| incident_aging | 44 |
-| catalogue_aging | 45 |
-| sla_x2 | 46 |
-| no_movement | 47 |
-| repeat_mi | 48 |
-| problems_no_rca | 49 |
+| incident_aging | 2 |
+| catalogue_aging | 3 |
+| sla_x2 | 4 |
+| no_movement | 5 |
+| repeat_mi | 6 |
+| problems_no_rca | 7 |
 
 Columns B/C/D/E = Wk1/Wk2/Wk3/Wk4. Each run shifts right and writes new value to Wk1 (col B).
 

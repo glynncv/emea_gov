@@ -17,6 +17,7 @@ Usage:
     python emea_gov_refresh.py --csv --csv-path "C:/path/to/file.csv"  # explicit path
     python emea_gov_refresh.py --csv --dry-run          # CSV load, no cockpit write
     python emea_gov_refresh.py --test-fetch             # Test incident fetch strategies
+    python emea_gov_refresh.py --shadow-backfill       # One-time historical Wk2/Wk3 Physics Block 4 backfill
 
 Configuration:
     Create a .env file in the same directory (see CONFIG section below).
@@ -497,8 +498,8 @@ def fetch_catalogue_tasks() -> pd.DataFrame:
     query  = EMEA_LOCATION_FILTER + "^stateNOT IN4,7"  # 4=Closed Complete, 7=Cancelled
     fields = [
         "number", "request_item.u_opened_on_behalf_of.location",
-        "opened_at", "sys_updated_on",
-        "state", "short_description"
+        "opened_at", "closed_at", "sys_updated_on",
+        "state", "short_description",
     ]
     print("  Fetching open catalogue tasks...")
     df = snow_query("sc_task", query, fields)
@@ -551,6 +552,166 @@ def fetch_problems() -> pd.DataFrame:
         df = df.rename(columns={"location.u_site_name": "location"})
 
     return df
+
+
+def _utc_snow_timestamp(dt: datetime) -> str:
+    """Format a timezone-aware instant for SNOW encoded queries (UTC)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fetch_historical_signal(as_of: datetime) -> dict:
+    """
+    Point-in-time SNOW datasets for EMEA scope (snapshot instant as_of, UTC).
+
+    Returns dict with keys: incidents, mi_history, tasks, problems — same shapes
+    as fetch_incidents / fetch_major_incident_history / fetch_catalogue_tasks /
+    fetch_problems for downstream calc_m1–m6 (pass as_of into those calculators).
+    """
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    as_of = as_of.astimezone(timezone.utc)
+    as_of_str = _utc_snow_timestamp(as_of)
+    since_1yr = _utc_snow_timestamp(as_of - timedelta(days=365))
+    since_60 = _utc_snow_timestamp(as_of - timedelta(days=60))
+    since_730 = _utc_snow_timestamp(as_of - timedelta(days=730))
+
+    # --- Incidents (batch-by-site): open as of as_of ---
+    inc_fields = [
+        "number", "location.u_site_name", "priority",
+        "opened_at", "sys_updated_on", "resolved_at",
+        "sla_target", "cmdb_ci", "problem_id",
+        "state", "short_description",
+    ]
+    print(f"  Historical incidents (as of {as_of_str} UTC, batch-by-site)...")
+    dfs_inc = []
+    for i, site in enumerate(EMEA_SITES, 1):
+        query = (
+            f"location.u_site_name={site}"
+            f"^opened_at>={since_1yr}"
+            f"^opened_at<{as_of_str}"
+            f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+            f"^resolved_atISEMPTY^ORresolved_at>{as_of_str}"
+        )
+        print(f"    [{i:>2}/{len(EMEA_SITES)}] {site[:45]}", end=" ", flush=True)
+        df_site = snow_query("incident", query, inc_fields)
+        print(f"— {len(df_site)} records", flush=True)
+        dfs_inc.append(df_site)
+
+    if not dfs_inc or all(d.empty for d in dfs_inc):
+        incidents = pd.DataFrame()
+    else:
+        incidents = pd.concat(dfs_inc, ignore_index=True)
+        if "location.u_site_name" in incidents.columns:
+            incidents = incidents.rename(columns={"location.u_site_name": "location"})
+        if "location" in incidents.columns:
+            incidents = incidents[incidents["location"].isin(EMEA_SITES)]
+
+    # --- MI history (P1/P2, 60-day window ending at as_of) ---
+    mi_fields = [
+        "number", "location.u_site_name", "priority",
+        "opened_at", "resolved_at", "closed_at",
+        "cmdb_ci", "problem_id", "state", "short_description",
+    ]
+    print(f"  Historical MI history (60d window ending {as_of_str} UTC)...")
+    dfs_mi = []
+    for i, site in enumerate(EMEA_SITES, 1):
+        query = (
+            f"location.u_site_name={site}"
+            f"^priorityIN1,2"
+            f"^opened_at>={since_60}"
+            f"^opened_at<{as_of_str}"
+            f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+        )
+        print(f"    [{i:>2}/{len(EMEA_SITES)}] {site[:45]}", end=" ", flush=True)
+        df_site = snow_query("incident", query, mi_fields)
+        print(f"— {len(df_site)} records", flush=True)
+        dfs_mi.append(df_site)
+
+    if not dfs_mi or all(d.empty for d in dfs_mi):
+        mi_history = pd.DataFrame()
+    else:
+        mi_history = pd.concat(dfs_mi, ignore_index=True)
+        if "location.u_site_name" in mi_history.columns:
+            mi_history = mi_history.rename(columns={"location.u_site_name": "location"})
+        if "location" in mi_history.columns:
+            mi_history = mi_history[mi_history["location"].isin(EMEA_SITES)]
+
+    # --- sc_task: EMEA location + point-in-time closure (closed_at applied in Python) ---
+    task_fields = [
+        "number", "request_item.u_opened_on_behalf_of.location",
+        "opened_at", "closed_at", "sys_updated_on",
+        "state", "short_description",
+    ]
+    print("  Historical catalogue tasks (sc_task)...")
+    # Broad fetch: avoid encoded closed_at OR-clauses that can return 0 rows on some instances;
+    # "open at snapshot" uses closed_at after fetch (see below).
+    task_query = (
+        EMEA_LOCATION_FILTER
+        + f"^opened_at>={since_730}"
+        + f"^opened_at<{as_of_str}"
+    )
+    tasks = snow_query("sc_task", task_query, task_fields)
+    loc_field = "request_item.u_opened_on_behalf_of.location"
+    if loc_field in tasks.columns:
+        tasks = tasks.rename(columns={loc_field: "location"})
+    if not tasks.empty and "location" in tasks.columns:
+        tasks["location"] = tasks["location"].str.replace(r"^\d+ - ", "", regex=True)
+        tasks = tasks[tasks["location"].isin(EMEA_SITES)]
+    # Open-at-snapshot: opened_at < as_of AND (closed_at is NULL OR closed_at > as_of)
+    if not tasks.empty:
+        if "opened_at" in tasks.columns:
+            tasks["opened_at"] = pd.to_datetime(tasks["opened_at"], utc=True, errors="coerce")
+        if "closed_at" in tasks.columns:
+            tasks["closed_at"] = pd.to_datetime(tasks["closed_at"], utc=True, errors="coerce")
+            opened_before = tasks["opened_at"].notna() & (tasks["opened_at"] < as_of)
+            still_open_at = tasks["closed_at"].isna() | (tasks["closed_at"] > as_of)
+            tasks = tasks[opened_before & still_open_at]
+        else:
+            logger.warning(
+                "Historical sc_task: closed_at not in API response — "
+                "cannot apply point-in-time closure filter"
+            )
+            tasks = tasks[tasks["opened_at"].notna() & (tasks["opened_at"] < as_of)]
+
+    # --- Problems: RCA required, open as of as_of (filter closed_at in Python) ---
+    prob_fields = [
+        "number", "location.u_site_name", "location.u_region",
+        "opened_at", "sys_updated_on", "closed_at",
+        "u_root_cause", "u_root_cause_category",
+        "problem_state", "short_description",
+        "u_rca_required",
+    ]
+    print("  Historical problems (RCA required)...")
+    prob_query = EMEA_LOCATION_FILTER + "^u_rca_required=Yes" + f"^opened_at<{as_of_str}"
+    problems = snow_query("problem", prob_query, prob_fields)
+    if not problems.empty:
+        if "closed_at" in problems.columns:
+            problems = problems[
+                problems["closed_at"].isna() | (problems["closed_at"] > as_of)
+            ]
+        else:
+            logger.warning(
+                "Historical problems: closed_at not in API response — "
+                "filtering with problem_state!=closed (snapshot accuracy may be limited)"
+            )
+            if "problem_state" in problems.columns:
+                problems = problems[problems["problem_state"].str.lower() != "closed"]
+    if not problems.empty and "location.u_site_name" in problems.columns:
+        problems = problems.rename(columns={"location.u_site_name": "location"})
+
+    logger.info(
+        f"fetch_historical_signal({as_of_str}): inc={len(incidents)} mi={len(mi_history)} "
+        f"tasks={len(tasks)} prob={len(problems)}"
+    )
+
+    return {
+        "incidents": incidents,
+        "mi_history": mi_history,
+        "tasks": tasks,
+        "problems": problems,
+    }
 
 
 def load_from_csv(path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -838,17 +999,26 @@ def fetch_euc_assets(euc_path: str) -> pd.DataFrame:
 # METRIC CALCULATIONS
 # ---------------------------------------------
 
-def age_days(df: pd.DataFrame, date_col: str = "opened_at") -> pd.Series:
-    """Return age in days from date_col to today."""
-    return (TODAY - df[date_col]).dt.total_seconds() / 86400
+def age_days(
+    df: pd.DataFrame,
+    date_col: str = "opened_at",
+    as_of: datetime | None = None,
+) -> pd.Series:
+    """Return age in days from date_col to as_of (or TODAY if as_of is None)."""
+    end = as_of if as_of is not None else TODAY
+    if getattr(end, "tzinfo", None) is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return (end - df[date_col]).dt.total_seconds() / 86400
 
 
-def calc_m1_incident_aging(incidents: pd.DataFrame) -> dict:
+def calc_m1_incident_aging(
+    incidents: pd.DataFrame, as_of: datetime | None = None
+) -> dict:
     """Metric 1: % open incidents aged <= 10 days."""
     if incidents.empty:
         return {"value": None, "note": "No data"}
     incidents = incidents.copy()
-    incidents["age_days"] = age_days(incidents)
+    incidents["age_days"] = age_days(incidents, "opened_at", as_of)
     compliant = (incidents["age_days"] <= 10).sum()
     total     = len(incidents)
     pct       = round(compliant / total * 100, 1) if total else 0
@@ -858,12 +1028,25 @@ def calc_m1_incident_aging(incidents: pd.DataFrame) -> dict:
     }
 
 
-def calc_m2_catalogue_aging(tasks: pd.DataFrame) -> dict:
+def calc_m2_catalogue_aging(
+    tasks: pd.DataFrame, as_of: datetime | None = None
+) -> dict:
     """Metric 2: % open catalogue tasks aged <= 30 days."""
     if tasks.empty:
         return {"value": None, "note": "No data"}
     tasks = tasks.copy()
-    tasks["age_days"] = age_days(tasks)
+    tasks["opened_at"] = pd.to_datetime(tasks["opened_at"], utc=True, errors="coerce")
+    if as_of is not None and "closed_at" in tasks.columns:
+        tasks["closed_at"] = pd.to_datetime(tasks["closed_at"], utc=True, errors="coerce")
+        end = as_of
+        if getattr(end, "tzinfo", None) is None:
+            end = end.replace(tzinfo=timezone.utc)
+        else:
+            end = end.astimezone(timezone.utc)
+        tasks = tasks[tasks["closed_at"].isna() | (tasks["closed_at"] > end)]
+    if tasks.empty:
+        return {"value": None, "note": "No data"}
+    tasks["age_days"] = age_days(tasks, "opened_at", as_of)
     compliant = (tasks["age_days"] <= 30).sum()
     total     = len(tasks)
     pct       = round(compliant / total * 100, 1) if total else 0
@@ -873,12 +1056,14 @@ def calc_m2_catalogue_aging(tasks: pd.DataFrame) -> dict:
     }
 
 
-def calc_m3_sla_x2(incidents: pd.DataFrame) -> dict:
+def calc_m3_sla_x2(
+    incidents: pd.DataFrame, as_of: datetime | None = None
+) -> dict:
     """Metric 3: Count of open incidents exceeding SLA x2, split by priority."""
     if incidents.empty:
         return {"value": 0, "note": "No data", "p12_count": 0, "p34_count": 0}
     inc = incidents.copy()
-    inc["age_days"] = age_days(inc)
+    inc["age_days"] = age_days(inc, "opened_at", as_of)
 
     # SLA target in days per record
     if "sla_target" in inc.columns and inc["sla_target"].notna().any():
@@ -901,19 +1086,33 @@ def calc_m3_sla_x2(incidents: pd.DataFrame) -> dict:
     }
 
 
-def calc_m4_no_movement(incidents: pd.DataFrame,
-                        tasks: pd.DataFrame) -> dict:
+def calc_m4_no_movement(
+    incidents: pd.DataFrame,
+    tasks: pd.DataFrame,
+    as_of: datetime | None = None,
+) -> dict:
     """Metric 4: Count of incidents with no update for >= 14 days (incidents only).
 
     Catalogue tasks are excluded — their health is captured by catalogue_aging (M2).
     no_movement is a lead indicator for incident SLA breaches; catalogue_aging is
     the lag indicator for catalogue backlog age.
+
+    Historical snapshots: only rows with sys_updated_on <= as_of are considered;
+    staleness is as_of - sys_updated_on. True point-in-time “no updates in the 14
+    days before as_of” is not fully reconstructable from sys_updated_on alone
+    without audit/history (sys_updated_on reflects last update as of today’s record).
     """
     if incidents.empty:
         return {"value": 0, "note": "No data"}
 
+    end = as_of if as_of is not None else TODAY
+    if getattr(end, "tzinfo", None) is None:
+        end = end.replace(tzinfo=timezone.utc)
+
     inc = incidents.copy()
-    inc["stale_days"] = (TODAY - inc["sys_updated_on"]).dt.total_seconds() / 86400
+    inc = inc[inc["sys_updated_on"].notna()]
+    inc = inc[inc["sys_updated_on"] <= end]
+    inc["stale_days"] = (end - inc["sys_updated_on"]).dt.total_seconds() / 86400
     stale = inc[inc["stale_days"] >= 14]
 
     site_counts = {}
@@ -969,7 +1168,9 @@ def calc_m5_repeat_mi(mi_history: pd.DataFrame) -> dict:
     }
 
 
-def calc_m6_problems_no_rca(problems: pd.DataFrame) -> dict:
+def calc_m6_problems_no_rca(
+    problems: pd.DataFrame, as_of: datetime | None = None
+) -> dict:
     """Metric 6: Open EMEA problems (RCA required) with no root cause and age > 30 days.
 
     Filters applied upstream in fetch_problems():
@@ -982,7 +1183,7 @@ def calc_m6_problems_no_rca(problems: pd.DataFrame) -> dict:
         return {"value": 0, "note": "No data", "watch_count": 0, "breach_count": 0}
 
     p = problems.copy()
-    p["age_days"] = age_days(p)
+    p["age_days"] = age_days(p, "opened_at", as_of)
 
     # Age > 30 days
     aged = p[p["age_days"] > 30].copy()
@@ -1561,8 +1762,8 @@ def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
     #                           Escalation Required col, Physics Block 4 row)
     # Calibrated from EMEA_Governance_Cockpit_2026.xlsx on 2026-03-07
     ROW_MAP = {
-        "incident_aging":   {"cv": "B4",  "ts": "F4",  "er": "G4",  "phys_row": 2},
-        "catalogue_aging":  {"cv": "B5",  "ts": "F5",  "er": "G5",  "phys_row": 3},
+        "incident_aging":   {"cv": "B4",  "ts": "F4",  "er": "G4",  "phys_row": 2, "pct": True},
+        "catalogue_aging":  {"cv": "B5",  "ts": "F5",  "er": "G5",  "phys_row": 3, "pct": True},
         "sla_x2":           {"cv": "B6",  "ts": "F6",  "er": "G6",  "phys_row": 4},
         "no_movement":      {"cv": "B8",  "ts": "F8",  "er": "G8",  "phys_row": 5},
         "repeat_mi":        {"cv": "B10", "ts": "F10", "er": "G10", "phys_row": 6},
@@ -1681,6 +1882,188 @@ def read_prev_values() -> dict:
 
 
 # ---------------------------------------------
+# SHADOW BACKFILL (one-time historical Physics Block 4 Wk2/Wk3)
+# ---------------------------------------------
+
+SHADOW_BACKFILL_DONE_PATH = os.path.join(_SCRIPT_DIR, "shadow_backfill.done")
+# Plan: 13 Mar / 20 Mar 2026 17:00 — encoded as UTC for SNOW queries (see SNOW_SHADOW_BACKFILL_PLAN.md)
+SHADOW_SNAPSHOT_WK2 = datetime(2026, 3, 13, 17, 0, tzinfo=timezone.utc)
+SHADOW_SNAPSHOT_WK3 = datetime(2026, 3, 20, 17, 0, tzinfo=timezone.utc)
+
+
+def _physics_cell_needs_backfill(val) -> bool:
+    """True if cell is blank or numeric zero (ghost placeholder)."""
+    if val is None:
+        return True
+    if isinstance(val, str) and not str(val).strip():
+        return True
+    try:
+        n = float(val)
+        if abs(n) < 1e-12:
+            return True
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def _physics_block4_stored_value(metric_key: str, raw) -> float | int:
+    """Match update_cockpit / shift_physics_trends: % as decimals, counts as ints."""
+    if metric_key in ("incident_aging", "catalogue_aging"):
+        if raw is None:
+            return 0.0
+        return round(float(raw) / 100.0, 4)
+    if raw is None:
+        return 0
+    return int(raw)
+
+
+def _compute_metrics_for_as_of(
+    incidents: pd.DataFrame,
+    mi_history: pd.DataFrame,
+    tasks: pd.DataFrame,
+    problems: pd.DataFrame,
+    as_of: datetime,
+) -> dict:
+    return {
+        "incident_aging": calc_m1_incident_aging(incidents, as_of),
+        "catalogue_aging": calc_m2_catalogue_aging(tasks, as_of),
+        "sla_x2": calc_m3_sla_x2(incidents, as_of),
+        "no_movement": calc_m4_no_movement(incidents, tasks, as_of),
+        "repeat_mi": calc_m5_repeat_mi(mi_history),
+        "problems_no_rca": calc_m6_problems_no_rca(problems, as_of),
+    }
+
+
+def run_shadow_backfill() -> None:
+    """
+    One-time backfill: two historical snapshots -> Physics_Engine col C (partial Wk2)
+    and col D (full Wk3). Exits if shadow_backfill.done exists next to this script.
+    """
+    if os.path.isfile(SHADOW_BACKFILL_DONE_PATH):
+        print(f"\n  Shadow backfill already completed — remove {SHADOW_BACKFILL_DONE_PATH} to re-run.\n")
+        logger.info(f"Shadow backfill skipped — done file exists: {SHADOW_BACKFILL_DONE_PATH}")
+        return
+
+    print(f"\n{'='*60}")
+    print("SHADOW BACKFILL — historical Physics Block 4 (Wk2 partial / Wk3 full)")
+    print(f"{'='*60}\n")
+    logger.info("Shadow backfill started")
+
+    global EMEA_SITES, EMEA_LOCATION_FILTER
+    print("Loading EMEA site list...")
+    sites = fetch_emea_sites()
+    EMEA_SITES = sites["site_names"]
+    EMEA_LOCATION_FILTER = "location.nameIN" + sites["location_ids"]
+    print(f"  Active EMEA sites: {sites['count']} (source: {sites['source']})")
+
+    print(f"\nSnapshot Wk2 (column C partial): {SHADOW_SNAPSHOT_WK2.isoformat()}")
+    sig2 = fetch_historical_signal(SHADOW_SNAPSHOT_WK2)
+    metrics_wk2 = _compute_metrics_for_as_of(
+        sig2["incidents"],
+        sig2["mi_history"],
+        sig2["tasks"],
+        sig2["problems"],
+        SHADOW_SNAPSHOT_WK2,
+    )
+
+    print(f"\nSnapshot Wk3 (column D full): {SHADOW_SNAPSHOT_WK3.isoformat()}")
+    sig3 = fetch_historical_signal(SHADOW_SNAPSHOT_WK3)
+    metrics_wk3 = _compute_metrics_for_as_of(
+        sig3["incidents"],
+        sig3["mi_history"],
+        sig3["tasks"],
+        sig3["problems"],
+        SHADOW_SNAPSHOT_WK3,
+    )
+
+    ghost: dict[str, object] = {}
+    try:
+        wb_ro = openpyxl.load_workbook(COCKPIT_PATH, data_only=True)
+        if "Physics_Engine" not in wb_ro.sheetnames:
+            print("\n  ERROR: Physics_Engine sheet not found — aborting shadow backfill")
+            logger.error("Shadow backfill aborted — Physics_Engine missing")
+            return
+        ws_ro = wb_ro["Physics_Engine"]
+        ghost = {"C3": ws_ro["C3"].value, "C5": ws_ro["C5"].value, "C6": ws_ro["C6"].value}
+    except FileNotFoundError:
+        print(f"\n  ERROR: Cockpit not found: {COCKPIT_PATH}")
+        logger.error("Shadow backfill aborted — cockpit missing")
+        return
+    except Exception as e:
+        print(f"\n  ERROR: Could not read cockpit for ghost check: {e}")
+        logger.error(f"Shadow backfill ghost read failed: {e}")
+        return
+
+    wk2_writes = [
+        ("catalogue_aging", "C3", metrics_wk2["catalogue_aging"].get("value")),
+        ("no_movement", "C5", metrics_wk2["no_movement"].get("value")),
+        ("repeat_mi", "C6", metrics_wk2["repeat_mi"].get("value")),
+    ]
+
+    try:
+        wb = openpyxl.load_workbook(COCKPIT_PATH)
+    except PermissionError:
+        print(f"\n  ERROR: Cannot open cockpit (file may be open): {COCKPIT_PATH}")
+        logger.error("Shadow backfill — permission denied loading cockpit")
+        return
+    except FileNotFoundError:
+        print(f"\n  ERROR: Cockpit not found: {COCKPIT_PATH}")
+        return
+    except Exception as e:
+        print(f"\n  ERROR: Loading cockpit failed: {e}")
+        logger.error(f"Shadow backfill load error: {e}")
+        return
+
+    if "Physics_Engine" not in wb.sheetnames:
+        print("\n  ERROR: Physics_Engine sheet not found")
+        return
+
+    ws = wb["Physics_Engine"]
+
+    print("\n  Wk2 partial writes (C3/C5/C6) — skip if cell already non-zero:")
+    for key, cell, raw in wk2_writes:
+        prev = ghost.get(cell)
+        if not _physics_cell_needs_backfill(prev):
+            print(f"    {cell} ({key}): skip — existing value")
+            continue
+        stored = _physics_block4_stored_value(key, raw)
+        ws[cell] = stored
+        print(f"    {cell} ({key}): {stored}")
+
+    wk3_order = [
+        "incident_aging",
+        "catalogue_aging",
+        "sla_x2",
+        "no_movement",
+        "repeat_mi",
+        "problems_no_rca",
+    ]
+    print("\n  Wk3 full writes (D2–D7):")
+    for i, key in enumerate(wk3_order):
+        cell = f"D{2 + i}"
+        raw = metrics_wk3[key].get("value")
+        stored = _physics_block4_stored_value(key, raw)
+        ws[cell] = stored
+        print(f"    {cell} ({key}): {stored}")
+
+    try:
+        wb.save(COCKPIT_PATH)
+        with open(SHADOW_BACKFILL_DONE_PATH, "w", encoding="utf-8") as dfh:
+            dfh.write(f"completed {datetime.now(timezone.utc).isoformat()}\n")
+        logger.info(f"Shadow backfill saved — {COCKPIT_PATH}")
+        print(f"\n  Shadow backfill complete — saved {COCKPIT_PATH}")
+        print(f"  Done file: {SHADOW_BACKFILL_DONE_PATH}\n")
+    except PermissionError:
+        logger.error("Shadow backfill save failed — permission denied")
+        print("\n  ERROR: Cannot save cockpit — close Excel and re-run")
+        return
+    except Exception as e:
+        logger.error(f"Shadow backfill save failed: {e}")
+        print(f"\n  ERROR: Save failed: {e}")
+        return
+
+
+# ---------------------------------------------
 # SITE COVERAGE VALIDATION
 # ---------------------------------------------
 
@@ -1744,7 +2127,16 @@ def main():
         metavar="PATH",
         help="Full path to consolidated CSV file (default: <script_dir>/SNOW_Exports/Current/EMEA_GOV_Weekly_Consolidated.csv)"
     )
+    parser.add_argument(
+        "--shadow-backfill",
+        action="store_true",
+        help="One-time historical backfill (Physics_Engine Block 4 col C partial / D full); creates shadow_backfill.done when complete",
+    )
     args = parser.parse_args()
+
+    if args.shadow_backfill:
+        run_shadow_backfill()
+        return
 
     if args.test_fetch:
         test_incident_fetch(limit=args.test_limit)
