@@ -35,7 +35,7 @@ import requests
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -82,6 +82,8 @@ logger.addHandler(console_handler)
 # SNOW_PASS=your_password
 # COCKPIT_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Cockpit\EMEA_Governance_Cockpit_2026.xlsx
 # EUC_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\EUC_EOSL.xlsx
+# OT_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\TF Tracker - OT.xlsx
+# SDWAN_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\TF - SD_WAN.xlsx
 # SNOW_LOCATIONS_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\SNOW_Exports\Current\PYTHON_EMEA_Locations.csv
 #   (optional — only needed to override the default fallback path)
 
@@ -91,6 +93,8 @@ SNOW_PASS     = os.getenv("SNOW_PASS")
 SNOW_VERIFY_SSL = os.getenv("SNOW_VERIFY_SSL", "true").lower() == "true"
 COCKPIT_PATH  = os.getenv("COCKPIT_PATH", "EMEA_Governance_Cockpit_2026.xlsx")
 EUC_PATH      = os.getenv("EUC_PATH", "EUC_EOSL.xlsx")
+OT_PATH       = os.getenv("OT_PATH", "TF Tracker - OT.xlsx")
+SDWAN_PATH    = os.getenv("SDWAN_PATH", "TF - SD_WAN.xlsx")
 
 # Fallback path for EMEA site list if cmn_location API call fails.
 # Default: SNOW_Exports\Current\PYTHON_EMEA_Locations.csv relative to script directory.
@@ -995,6 +999,113 @@ def fetch_euc_assets(euc_path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _parse_ot_sys_updated(val) -> datetime | None:
+    """Normalize P3 Export sys_updated_on cell to naive datetime for max comparison."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None) if val.tzinfo else val
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
+    ts = pd.to_datetime(val, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.to_pydatetime()
+
+
+def fetch_ot_last_activity(ot_path: str) -> dict:
+    """
+    Read TF Tracker - OT.xlsx P3 Export sheet.
+    Returns dict of {p3_site_name: last_activity_date} using most recent
+    sys_updated_on per site. Returns empty dict if file not found.
+    """
+    if not os.path.exists(ot_path):
+        print(f"  WARNING: OT tracker file not found ({ot_path}) — Physics Block 3 unchanged")
+        logger.warning(f"OT tracker file not found: {ot_path}")
+        return {}
+
+    try:
+        wb = openpyxl.load_workbook(ot_path, data_only=True)
+    except Exception as e:
+        print(f"  WARNING: Could not open OT tracker ({ot_path}): {e}")
+        logger.warning(f"OT tracker open failed: {e}")
+        return {}
+
+    if "P3 Export" not in wb.sheetnames:
+        print("  WARNING: Sheet 'P3 Export' not found in OT tracker — Physics Block 3 unchanged")
+        logger.warning(f"P3 Export sheet missing in {ot_path}; sheets: {wb.sheetnames}")
+        return {}
+
+    ws = wb["P3 Export"]
+    latest: dict[str, datetime] = {}
+
+    for row in ws.iter_rows(min_row=2, min_col=1, max_col=6, values_only=True):
+        if not row:
+            continue
+        site = row[1]
+        sys_updated = row[5]
+        if site is None or str(site).strip() == "":
+            continue
+        dt = _parse_ot_sys_updated(sys_updated)
+        if dt is None:
+            continue
+        site_key = str(site).strip()
+        if site_key not in latest or dt > latest[site_key]:
+            latest[site_key] = dt
+
+    return {k: v.date() for k, v in latest.items()}
+
+
+def fetch_sdwan_metrics(sdwan_path: str) -> dict | None:
+    """
+    Read TF - SD_WAN.xlsx P2 Export sheet.
+    Returns dict with total_sites, completed_sites, remaining_sites.
+    Excludes Withdrawn sites from total.
+    Returns None if file not found.
+    """
+    if not os.path.exists(sdwan_path):
+        print(f"  WARNING: SD-WAN tracker file not found ({sdwan_path}) — Physics Block 2 unchanged")
+        logger.warning(f"SD-WAN tracker file not found: {sdwan_path}")
+        return None
+
+    try:
+        wb = openpyxl.load_workbook(sdwan_path, data_only=True)
+    except Exception as e:
+        print(f"  WARNING: Could not open SD-WAN tracker ({sdwan_path}): {e}")
+        logger.warning(f"SD-WAN tracker open failed: {e}")
+        return None
+
+    if "P2 Export" not in wb.sheetnames:
+        print("  WARNING: Sheet 'P2 Export' not found in SD-WAN tracker — Physics Block 2 unchanged")
+        logger.warning(f"P2 Export sheet missing in {sdwan_path}; sheets: {wb.sheetnames}")
+        return None
+
+    ws = wb["P2 Export"]
+    total_sites = 0
+    completed_sites = 0
+
+    for row in ws.iter_rows(min_row=2, min_col=1, max_col=4, values_only=True):
+        if not row:
+            continue
+        number = row[0]
+        state_raw = row[3]
+        if number is None or str(number).strip() == "":
+            continue
+        state = str(state_raw).strip() if state_raw is not None else ""
+        if state == "Withdrawn":
+            continue
+        total_sites += 1
+        if state == "Complete":
+            completed_sites += 1
+
+    remaining_sites = total_sites - completed_sites
+    return {
+        "total_sites": total_sites,
+        "completed_sites": completed_sites,
+        "remaining_sites": remaining_sites,
+    }
+
+
 # ---------------------------------------------
 # METRIC CALCULATIONS
 # ---------------------------------------------
@@ -1345,6 +1456,17 @@ def set_trigger_cell(ws, cell_ref: str, status: str):
     cell.font  = FONTS.get(status, FONTS["PENDING"])
 
 
+# Enterprise_Panel — Stream 1 (EUC / Tech Refresh), fixed row 4 (layout 25 Mar 2026).
+# C4 Remaining units (int), E4 weeks to 31 Dec 2026, F4 required weekly burn, H4 physics status.
+# G4 = Actual 4W Rolling Burn (manual — read only). I4/J4 not written by this script.
+ENTERPRISE_EUC_S1_C4 = "C4"
+ENTERPRISE_EUC_S1_E4 = "E4"
+ENTERPRISE_EUC_S1_F4 = "F4"
+ENTERPRISE_EUC_S1_G4 = "G4"  # read-only
+ENTERPRISE_EUC_S1_H4 = "H4"
+EUC_STREAM1_TARGET_END = date(2026, 12, 31)
+
+
 def shift_physics_trends(ws_physics, row: int, new_value: float):
     """
     Shift Wk1->Wk2, Wk2->Wk3, Wk3->Wk4 in Physics_Engine Block 4.
@@ -1363,29 +1485,21 @@ def shift_physics_trends(ws_physics, row: int, new_value: float):
 def update_enterprise_panel_euc(ws_enterprise, euc_metrics: dict):
     """
     Write EUC stream 1 (Tech Refresh) to Enterprise_Panel row 4 — fixed layout (25 Mar 2026).
-    C4 remaining units (int), E4 weeks to 31 Dec 2026, F4 required weekly burn, H4 physics status.
+    Writes C4, E4, F4, H4 only (direct cell refs; no row search by label).
     G4 is manual (Actual 4W Rolling Burn) — read only, never overwritten.
     """
-    # Stream 1 fixed refs — no label row search
-    CELL_UNITS_REMAINING = "C4"
-    CELL_WEEKS_REMAINING = "E4"
-    CELL_REQUIRED_BURN = "F4"
-    CELL_ACTUAL_BURN = "G4"  # read-only
-    CELL_PHYSICS_STATUS = "H4"
-
     units_remaining = int(euc_metrics.get("remaining", 0) or 0)
 
-    end_date = datetime(2026, 12, 31, tzinfo=timezone.utc).date()
     today_date = TODAY.date()
-    days_to_end = (end_date - today_date).days
-    weeks_remaining = round(days_to_end / 7, 1)
+    days_to_end = (EUC_STREAM1_TARGET_END - today_date).days
+    weeks_remaining = round(max(0, days_to_end) / 7, 1)
 
     if weeks_remaining and weeks_remaining > 0:
         required_burn = round(units_remaining / weeks_remaining, 1)
     else:
         required_burn = 0.0
 
-    raw_actual = ws_enterprise[CELL_ACTUAL_BURN].value
+    raw_actual = ws_enterprise[ENTERPRISE_EUC_S1_G4].value
     try:
         actual_burn = float(raw_actual) if raw_actual is not None and str(raw_actual).strip() != "" else 0.0
     except (TypeError, ValueError):
@@ -1398,10 +1512,10 @@ def update_enterprise_panel_euc(ws_enterprise, euc_metrics: dict):
     else:
         physics_status = "BREACHED"
 
-    ws_enterprise[CELL_UNITS_REMAINING].value = units_remaining
-    ws_enterprise[CELL_WEEKS_REMAINING].value = weeks_remaining
-    ws_enterprise[CELL_REQUIRED_BURN].value = required_burn
-    ws_enterprise[CELL_PHYSICS_STATUS].value = physics_status
+    ws_enterprise[ENTERPRISE_EUC_S1_C4].value = units_remaining
+    ws_enterprise[ENTERPRISE_EUC_S1_E4].value = weeks_remaining
+    ws_enterprise[ENTERPRISE_EUC_S1_F4].value = required_burn
+    ws_enterprise[ENTERPRISE_EUC_S1_H4].value = physics_status
 
     logger.info(
         f"Enterprise_Panel EUC (row 4): remaining={units_remaining}, weeks={weeks_remaining}, "
@@ -1481,6 +1595,77 @@ def update_physics_block1(ws_physics, euc_metrics: dict):
     except Exception as e:
         logger.warning(f"Error updating Physics Block 1: {str(e)}")
         print(f"  WARNING: Could not update Physics Block 1 - check cell references")
+
+
+# Physics Block 3 — OT stagnation (col B last activity); P3 short name -> cockpit row
+BLOCK3_SITE_MAP = {
+    30: "Amal",
+    31: "Gillingham",
+    32: "Iasi",
+    33: "Izmir",
+    34: "Izmir",
+    35: "Krakow TC",
+}
+
+
+def update_physics_block3(ws_physics, ot_activity: dict):
+    """
+    Write Last Activity Date to Physics_Engine Block 3 col B for 6 active sites.
+    Col B cells are date-formatted input cells — write date values only.
+    Do not overwrite cols C, D, E, F, G (formulas or manual inputs).
+    Do not touch rows 36–39 (out of scope rows).
+    """
+    try:
+        for row, p3_name in BLOCK3_SITE_MAP.items():
+            if p3_name not in ot_activity:
+                print(
+                    f"  WARNING: No OT last activity for P3 site '{p3_name}' "
+                    f"(Physics row {row}) — col B unchanged"
+                )
+                logger.warning(f"Physics Block 3: no OT activity for {p3_name} (row {row})")
+                continue
+            d = ot_activity[p3_name]
+            if isinstance(d, datetime):
+                d = d.date()
+            if not isinstance(d, date):
+                logger.warning(f"Physics Block 3: expected date for {p3_name}, got {type(d)}")
+                continue
+            cell = ws_physics.cell(row=row, column=2)
+            cell.value = d
+            cell.number_format = "DD-MMM-YYYY"
+        logger.info("Physics Block 3: OT last activity dates applied where data available")
+    except Exception as e:
+        logger.warning(f"Error updating Physics Block 3: {e}")
+        print(f"  WARNING: Could not update Physics Block 3 — {e}")
+
+
+# Physics Block 2 — SD-WAN legacy network burn (B18/B19 inputs; B20 manual; B21:B25 formulas)
+BLOCK2_CELLS = {
+    "total_sites":     "B18",  # Total EMEA Sites in Scope
+    "completed_sites": "B19",  # Sites Completed
+    # B20 = Rolling 4W Average — manual input, DO NOT WRITE
+}
+
+
+def update_physics_block2(ws_physics, sdwan_metrics: dict):
+    """
+    Write SD-WAN metrics to Physics_Engine Block 2.
+    Writes B18 (total) and B19 (completed) only.
+    B20 (Rolling 4W Average) is manual — do not overwrite.
+    B21:B25 are formula-driven — do not overwrite.
+    """
+    total = sdwan_metrics["total_sites"]
+    completed = sdwan_metrics["completed_sites"]
+    remaining = sdwan_metrics["remaining_sites"]
+    try:
+        ws_physics[BLOCK2_CELLS["total_sites"]].value = total
+        ws_physics[BLOCK2_CELLS["completed_sites"]].value = completed
+        logger.info(
+            f"Physics Block 2 updated — Total: {total}, Completed: {completed}, Remaining: {remaining}"
+        )
+    except Exception as e:
+        logger.warning(f"Error updating Physics Block 2: {e}")
+        print(f"  WARNING: Could not update Physics Block 2 — {e}")
 
 
 METRIC_DISPLAY_NAMES = {
@@ -1723,7 +1908,12 @@ def write_trigger_log(wb, results_summary: list):
     return logged
 
 
-def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
+def update_cockpit(
+    metrics: dict,
+    prev_values: dict,
+    euc_metrics: dict = None,
+    ot_activity: dict | None = None,
+):
     """
     Write all calculated metrics into the cockpit Excel file.
     Row references below match the Operations_Panel layout from Build Pack v1.
@@ -1832,6 +2022,27 @@ def update_cockpit(metrics: dict, prev_values: dict, euc_metrics: dict = None):
     # Update Physics Block 1 (Enterprise_Panel EUC row 4 is applied in main() after this save)
     if euc_metrics and euc_metrics.get("total_units", 0) > 0:
         update_physics_block1(ws_physics, euc_metrics)
+
+    # Physics Block 3 — OT stagnation last activity dates
+    if ot_activity:
+        update_physics_block3(ws_physics, ot_activity)
+        print(
+            f"  Physics Block 3: OT activity dates updated for {len(ot_activity)} P3 site(s)"
+        )
+    else:
+        print("  Physics Block 3: OT tracker not found — Block 3 unchanged")
+
+    # Physics Block 2 — SD-WAN burn metrics
+    sdwan_metrics = fetch_sdwan_metrics(SDWAN_PATH)
+    if sdwan_metrics:
+        update_physics_block2(ws_physics, sdwan_metrics)
+        print(
+            f"  Physics Block 2: SD-WAN — "
+            f"{sdwan_metrics['completed_sites']}/{sdwan_metrics['total_sites']} sites complete, "
+            f"{sdwan_metrics['remaining_sites']} remaining"
+        )
+    else:
+        print("  Physics Block 2: SD-WAN tracker not found — Block 2 unchanged")
 
     # Append BREACHED entries to Trigger_Log
     write_trigger_log(wb, results_summary)
@@ -2199,6 +2410,9 @@ def main():
     euc_df = fetch_euc_assets(EUC_PATH)
     euc_metrics = calc_physics_block1_euc(euc_df) if not euc_df.empty else None
 
+    print("\nReading OT tracker (P3 Export) for Physics Block 3...")
+    ot_activity = fetch_ot_last_activity(OT_PATH)
+
     # 3. Validate site coverage
     print("\nValidating site coverage...")
     validate_site_coverage(incidents, tasks, problems)
@@ -2269,7 +2483,7 @@ def main():
 
     else:
         print(f"\nUpdating cockpit: {COCKPIT_PATH}")
-        summary = update_cockpit(metrics, prev_values, euc_metrics)
+        summary = update_cockpit(metrics, prev_values, euc_metrics, ot_activity)
         save_enterprise_panel_euc_after_cockpit(COCKPIT_PATH, euc_metrics)
 
     # 6. Print summary
