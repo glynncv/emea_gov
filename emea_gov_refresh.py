@@ -140,6 +140,19 @@ EMEA_LOCATION_FILTER: str = ""        # location.nameIN<ids> (SNOW-side filter f
 # LogicMonitor/Integration caller — exclude from incident metrics (monitoring/event tickets)
 CALLER_EXCLUDE_SYS_ID = "24f555b8c387f6d41edf787dc00131a6"
 
+# sc_task: sysparm_fields aligned for sys_updated_on (stagnation), RITM state, and point-in-time closure.
+SC_TASK_SYSPARM_FIELDS = [
+    "number",
+    "opened_at",
+    "sys_updated_on",
+    "closed_at",
+    "assignment_group",
+    "request_item.cat_item",
+    "request_item.state",
+    "request_item.u_opened_on_behalf_of.location",
+    "state",
+]
+
 
 # ---------------------------------------------
 # SNOW API HELPERS
@@ -490,6 +503,46 @@ def fetch_major_incident_history() -> pd.DataFrame:
     return df
 
 
+def _postprocess_sc_task_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename dot-walked sc_task columns and strip numeric prefix from location."""
+    if df.empty:
+        return df
+    df = df.copy()
+    loc_field = "request_item.u_opened_on_behalf_of.location"
+    if loc_field in df.columns:
+        df = df.rename(columns={loc_field: "location"})
+    if "request_item.state" in df.columns:
+        df = df.rename(columns={"request_item.state": "ritm_state"})
+    if "request_item.cat_item" in df.columns:
+        df = df.rename(columns={"request_item.cat_item": "cat_item"})
+    if "location" in df.columns:
+        df["location"] = df["location"].str.replace(r"^\d+ - ", "", regex=True)
+    return df
+
+
+def _active_sc_task_mask(df: pd.DataFrame) -> pd.Series:
+    """Active catalogue tasks: RITM state (else sc_task state) NOT IN 3, 4, 7."""
+    ritm = (
+        pd.to_numeric(df["ritm_state"], errors="coerce")
+        if "ritm_state" in df.columns
+        else pd.Series(index=df.index, dtype=float)
+    )
+    sc = (
+        pd.to_numeric(df["state"], errors="coerce")
+        if "state" in df.columns
+        else pd.Series(index=df.index, dtype=float)
+    )
+    if "ritm_state" in df.columns and "state" in df.columns:
+        eff = ritm.combine_first(sc)
+    elif "ritm_state" in df.columns:
+        eff = ritm
+    elif "state" in df.columns:
+        eff = sc
+    else:
+        return pd.Series(True, index=df.index)
+    return eff.isna() | ~eff.isin([3, 4, 7])
+
+
 def fetch_catalogue_tasks() -> pd.DataFrame:
     """Open catalogue tasks for all 25 EMEA sites.
 
@@ -499,23 +552,10 @@ def fetch_catalogue_tasks() -> pd.DataFrame:
     Values include a numeric site code prefix, e.g. "10610 - Warwick - United Kingdom".
     The prefix is stripped before matching against EMEA_SITES.
     """
-    query  = EMEA_LOCATION_FILTER + "^stateNOT IN4,7"  # 4=Closed Complete, 7=Cancelled
-    fields = [
-        "number", "request_item.u_opened_on_behalf_of.location",
-        "opened_at", "closed_at", "sys_updated_on",
-        "state", "short_description",
-    ]
+    query = EMEA_LOCATION_FILTER + "^stateNOT IN3,4,7"
     print("  Fetching open catalogue tasks...")
-    df = snow_query("sc_task", query, fields)
-
-    # Rename dot-walked field to simple column name
-    loc_field = "request_item.u_opened_on_behalf_of.location"
-    if loc_field in df.columns:
-        df = df.rename(columns={loc_field: "location"})
-
-    # Strip numeric site code prefix ("10610 - Warwick..." -> "Warwick...")
-    if not df.empty and "location" in df.columns:
-        df["location"] = df["location"].str.replace(r"^\d+ - ", "", regex=True)
+    df = snow_query("sc_task", query, SC_TASK_SYSPARM_FIELDS)
+    df = _postprocess_sc_task_df(df)
 
     # Filter to EMEA sites only
     if not df.empty and "location" in df.columns:
@@ -643,11 +683,6 @@ def fetch_historical_signal(as_of: datetime) -> dict:
             mi_history = mi_history[mi_history["location"].isin(EMEA_SITES)]
 
     # --- sc_task: EMEA location + point-in-time closure (closed_at applied in Python) ---
-    task_fields = [
-        "number", "request_item.u_opened_on_behalf_of.location",
-        "opened_at", "closed_at", "sys_updated_on",
-        "state", "short_description",
-    ]
     print("  Historical catalogue tasks (sc_task)...")
     # Broad fetch: avoid encoded closed_at OR-clauses that can return 0 rows on some instances;
     # "open at snapshot" uses closed_at after fetch (see below).
@@ -656,12 +691,9 @@ def fetch_historical_signal(as_of: datetime) -> dict:
         + f"^opened_at>={since_730}"
         + f"^opened_at<{as_of_str}"
     )
-    tasks = snow_query("sc_task", task_query, task_fields)
-    loc_field = "request_item.u_opened_on_behalf_of.location"
-    if loc_field in tasks.columns:
-        tasks = tasks.rename(columns={loc_field: "location"})
+    tasks = snow_query("sc_task", task_query, SC_TASK_SYSPARM_FIELDS)
+    tasks = _postprocess_sc_task_df(tasks)
     if not tasks.empty and "location" in tasks.columns:
-        tasks["location"] = tasks["location"].str.replace(r"^\d+ - ", "", regex=True)
         tasks = tasks[tasks["location"].isin(EMEA_SITES)]
     # Open-at-snapshot: opened_at < as_of AND (closed_at is NULL OR closed_at > as_of)
     if not tasks.empty:
@@ -776,9 +808,10 @@ def load_from_csv(path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, 
         task_raw = df_raw[df_raw["sys_class_name"] == "sc_task"].copy()
         if "state" in task_raw.columns:
             task_raw["state"] = pd.to_numeric(task_raw["state"], errors="coerce")
-            tasks = task_raw[~task_raw["state"].isin([4, 7])]
-        else:
-            tasks = task_raw
+        task_raw = _postprocess_sc_task_df(task_raw)
+        if "ritm_state" in task_raw.columns:
+            task_raw["ritm_state"] = pd.to_numeric(task_raw["ritm_state"], errors="coerce")
+        tasks = task_raw[_active_sc_task_mask(task_raw)]
 
     problems = pd.DataFrame()
     if "problem" in df_raw.get("sys_class_name", pd.Series()).values:
@@ -1142,10 +1175,16 @@ def calc_m1_incident_aging(
 def calc_m2_catalogue_aging(
     tasks: pd.DataFrame, as_of: datetime | None = None
 ) -> dict:
-    """Metric 2: % open catalogue tasks aged <= 30 days."""
+    """Metric 2: % of *active* catalogue tasks aged >30 days (aging backlog).
+
+    Denominator: active EMEA tasks (RITM state else sc_task state NOT IN 3, 4, 7).
+    Numerator: those with opened_at >30 days before snapshot.
+    """
     if tasks.empty:
         return {"value": None, "note": "No data"}
     tasks = tasks.copy()
+    if "ritm_state" not in tasks.columns and "request_item.state" in tasks.columns:
+        tasks = tasks.rename(columns={"request_item.state": "ritm_state"})
     tasks["opened_at"] = pd.to_datetime(tasks["opened_at"], utc=True, errors="coerce")
     if as_of is not None and "closed_at" in tasks.columns:
         tasks["closed_at"] = pd.to_datetime(tasks["closed_at"], utc=True, errors="coerce")
@@ -1157,13 +1196,16 @@ def calc_m2_catalogue_aging(
         tasks = tasks[tasks["closed_at"].isna() | (tasks["closed_at"] > end)]
     if tasks.empty:
         return {"value": None, "note": "No data"}
+    tasks = tasks[_active_sc_task_mask(tasks)]
+    if tasks.empty:
+        return {"value": None, "note": "No data"}
     tasks["age_days"] = age_days(tasks, "opened_at", as_of)
-    compliant = (tasks["age_days"] <= 30).sum()
-    total     = len(tasks)
-    pct       = round(compliant / total * 100, 1) if total else 0
+    total = len(tasks)
+    aged = int((tasks["age_days"] > 30).sum())
+    pct = round(aged / total * 100, 1) if total else 0
     return {
         "value": pct,
-        "note":  f"{compliant}/{total} tasks aged <=30 days"
+        "note":  f"{aged}/{total} active tasks aged >30d ({pct:.1f}% aging)",
     }
 
 
@@ -1202,40 +1244,54 @@ def calc_m4_no_movement(
     tasks: pd.DataFrame,
     as_of: datetime | None = None,
 ) -> dict:
-    """Metric 4: Count of incidents with no update for >= 14 days (incidents only).
+    """Metric 4: Count of incidents + catalogue tasks stagnant for >= 14 days.
 
-    Catalogue tasks are excluded — their health is captured by catalogue_aging (M2).
-    no_movement is a lead indicator for incident SLA breaches; catalogue_aging is
-    the lag indicator for catalogue backlog age.
+    Stagnant means (snapshot time - sys_updated_on) >= 14 days, using sys_updated_on
+    from each record (restored on sc_task for catalogue work).
 
-    Historical snapshots: only rows with sys_updated_on <= as_of are considered;
-    staleness is as_of - sys_updated_on. True point-in-time “no updates in the 14
-    days before as_of” is not fully reconstructable from sys_updated_on alone
-    without audit/history (sys_updated_on reflects last update as of today’s record).
+    Historical snapshots: only rows with sys_updated_on <= as_of are used for
+    staleness vs as_of.
     """
-    if incidents.empty:
-        return {"value": 0, "note": "No data"}
-
     end = as_of if as_of is not None else TODAY
     if getattr(end, "tzinfo", None) is None:
         end = end.replace(tzinfo=timezone.utc)
 
-    inc = incidents.copy()
-    inc = inc[inc["sys_updated_on"].notna()]
-    inc = inc[inc["sys_updated_on"] <= end]
-    inc["stale_days"] = (end - inc["sys_updated_on"]).dt.total_seconds() / 86400
-    stale = inc[inc["stale_days"] >= 14]
+    if incidents.empty and (tasks.empty or "sys_updated_on" not in tasks.columns):
+        return {"value": 0, "note": "No data"}
 
-    site_counts = {}
-    if "location" in stale.columns:
-        for site, cnt in stale["location"].value_counts().items():
-            site_counts[site] = site_counts.get(site, 0) + cnt
+    site_counts: dict[str, int] = {}
+    stale_count = 0
+
+    if not incidents.empty:
+        inc = incidents.copy()
+        inc = inc[inc["sys_updated_on"].notna()]
+        inc = inc[inc["sys_updated_on"] <= end]
+        if not inc.empty:
+            inc["stale_days"] = (end - inc["sys_updated_on"]).dt.total_seconds() / 86400
+            stale_inc = inc[inc["stale_days"] >= 14]
+            stale_count += len(stale_inc)
+            if "location" in stale_inc.columns:
+                for site, cnt in stale_inc["location"].value_counts().items():
+                    site_counts[site] = site_counts.get(site, 0) + cnt
+
+    if not tasks.empty and "sys_updated_on" in tasks.columns:
+        t = tasks.copy()
+        t["sys_updated_on"] = pd.to_datetime(t["sys_updated_on"], utc=True, errors="coerce")
+        t = t[t["sys_updated_on"].notna()]
+        t = t[t["sys_updated_on"] <= end]
+        if not t.empty:
+            t["stale_days"] = (end - t["sys_updated_on"]).dt.total_seconds() / 86400
+            stale_t = t[t["stale_days"] >= 14]
+            stale_count += len(stale_t)
+            if "location" in stale_t.columns:
+                for site, cnt in stale_t["location"].value_counts().items():
+                    site_counts[site] = site_counts.get(site, 0) + cnt
 
     top5 = sorted(site_counts.items(), key=lambda x: x[1], reverse=True)[:5]
     top5_str = ", ".join(f"{s}:{c}" for s, c in top5) if top5 else "none"
     return {
-        "value": len(stale),
-        "note":  f"Top sites: {top5_str}"
+        "value": stale_count,
+        "note":  f"Top sites: {top5_str}",
     }
 
 
@@ -1391,9 +1447,10 @@ def evaluate_trigger(metric_name: str, current: float,
         return "GREEN"
 
     elif metric_name == "catalogue_aging":
-        if current is not None and current < 90 and prev_week is not None and prev_week < 90:
+        # current = % aging (higher is worse); >10% mirrors prior rule (compliance <90%)
+        if current is not None and current > 10 and prev_week is not None and prev_week > 10:
             return "BREACHED"
-        if current is not None and current < 90:
+        if current is not None and current > 10:
             return "WATCH"
         return "GREEN"
 
@@ -1469,17 +1526,17 @@ EUC_STREAM1_TARGET_END = date(2026, 12, 31)
 
 def shift_physics_trends(ws_physics, row: int, new_value: float):
     """
-    Shift Wk1->Wk2, Wk2->Wk3, Wk3->Wk4 in Physics_Engine Block 4.
-    Then write new_value into Wk1.
-    Column layout assumed: A=Metric, B=Wk1, C=Wk2, D=Wk3, E=Wk4
-    (adjust col letters to match your actual workbook layout)
+    Roll Physics_Engine Block 4 weekly columns before writing the new snapshot.
+
+    For row `row`, columns B–E are Wk1–Wk4. The prior Wk1 cell value moves into Wk2,
+    Wk2->Wk3, Wk3->Wk4; the oldest week (previous Wk4) is dropped. Then `new_value`
+    is written to Wk1 (B{row}).
     """
     cols = ["B", "C", "D", "E"]  # Wk1, Wk2, Wk3, Wk4
-    # Shift right to left: E=D, D=C, C=B
     for i in range(len(cols) - 1, 0, -1):
         src = ws_physics[f"{cols[i-1]}{row}"].value
         ws_physics[f"{cols[i]}{row}"] = src
-    ws_physics[f"{cols[0]}{row}"] = new_value  # new value into Wk1
+    ws_physics[f"{cols[0]}{row}"] = new_value
 
 
 def update_enterprise_panel_euc(ws_enterprise, euc_metrics: dict):
