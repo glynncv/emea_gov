@@ -4,8 +4,8 @@ Version: v5
 Owner: EMEA SDM (Colman)
 Purpose: Query SNOW REST API, calculate Operations Panel metrics,
          update Physics Engine trends, write results to cockpit Excel file.
-         Open incidents and MI history use batch-by-site queries (location.u_site_name
-         per EMEA site) because this SNOW instance ignores broader location filters on incident.
+         Open incidents and MI history use batch-by-site queries with
+         location.u_region=EMEA^location.u_site_name=<site> (site names can duplicate across regions).
 
 Dependencies:
     pip install requests openpyxl pandas python-dotenv
@@ -135,7 +135,11 @@ LOCATION_EXCLUSIONS = [
 # EMEA physical site lists — populated at runtime by fetch_emea_sites() in main().
 # Do not edit these directly; update LOCATION_EXCLUSIONS above to control scope.
 EMEA_SITES: list[str] = []            # u_site_name display names (Python-side filter)
-EMEA_LOCATION_FILTER: str = ""        # location.nameIN<ids> (SNOW-side filter for sc_task/problem)
+EMEA_LOCATION_FILTER: str = ""        # location.nameIN<ids> (SNOW-side filter for problem/sc_task patterns)
+# Incident: u_site_name can match multiple regions — every incident sysparm_query must include this.
+INCIDENT_REGION_SYSPARM = "location.u_region=EMEA^"
+# sc_task rarely populates task.location; EMEA scope uses requestor's location (RITM path).
+SC_TASK_LOCATION_FILTER: str = ""     # request_item.u_opened_on_behalf_of.location.nameIN<ids>
 
 # LogicMonitor/Integration caller — exclude from incident metrics (monitoring/event tickets)
 CALLER_EXCLUDE_SYS_ID = "24f555b8c387f6d41edf787dc00131a6"
@@ -414,9 +418,9 @@ def fetch_emea_sites() -> dict:
 def fetch_incidents() -> pd.DataFrame:
     """Open incidents for all EMEA sites — batch-by-site.
 
-    SNOW incident table ignores server-side location filters (nameIN, u_region).
-    Querying one site at a time using location.u_site_name=<site> is the only
-    reliable approach. Runs one query per EMEA site and concatenates results.
+    Each sysparm_query uses location.u_region=EMEA^location.u_site_name=<site> so
+    duplicate site names in other regions do not leak into EMEA counts. Runs one
+    query per EMEA site and concatenates results.
     Excludes LogicMonitor/Integration caller (monitoring/event tickets).
     Date filter: last 12 months (opened_at >= 365 days ago). Adjust timedelta if needed.
     """
@@ -432,7 +436,7 @@ def fetch_incidents() -> pd.DataFrame:
     for i, site in enumerate(EMEA_SITES, 1):
         # 6=Resolved, 7=Closed, 8=Autoclosed
         query = (
-            f"location.u_site_name={site}"
+            f"{INCIDENT_REGION_SYSPARM}location.u_site_name={site}"
             f"^stateNOT IN6,7,8"
             f"^opened_at>={since_1yr}"
             f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
@@ -463,7 +467,7 @@ def fetch_major_incident_history() -> pd.DataFrame:
     """P1/P2 incidents (open or closed) in the past 60 days — batch-by-site.
 
     Used for repeat MI check (calc_m5). Same batch-by-site approach as
-    fetch_incidents() — SNOW location filters are ignored on incident table.
+    fetch_incidents() with location.u_region=EMEA on each query.
     Excludes LogicMonitor/Integration caller.
     """
     since = (TODAY - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
@@ -476,7 +480,7 @@ def fetch_major_incident_history() -> pd.DataFrame:
     dfs = []
     for i, site in enumerate(EMEA_SITES, 1):
         query = (
-            f"location.u_site_name={site}"
+            f"{INCIDENT_REGION_SYSPARM}location.u_site_name={site}"
             f"^priorityIN1,2"
             f"^opened_at>={since}"
             f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
@@ -552,7 +556,7 @@ def fetch_catalogue_tasks() -> pd.DataFrame:
     Values include a numeric site code prefix, e.g. "10610 - Warwick - United Kingdom".
     The prefix is stripped before matching against EMEA_SITES.
     """
-    query = EMEA_LOCATION_FILTER + "^stateNOT IN3,4,7"
+    query = SC_TASK_LOCATION_FILTER + "^stateNOT IN3,4,7"
     print("  Fetching open catalogue tasks...")
     df = snow_query("sc_task", query, SC_TASK_SYSPARM_FIELDS)
     df = _postprocess_sc_task_df(df)
@@ -632,7 +636,7 @@ def fetch_historical_signal(as_of: datetime) -> dict:
     dfs_inc = []
     for i, site in enumerate(EMEA_SITES, 1):
         query = (
-            f"location.u_site_name={site}"
+            f"{INCIDENT_REGION_SYSPARM}location.u_site_name={site}"
             f"^opened_at>={since_1yr}"
             f"^opened_at<{as_of_str}"
             f"^caller_id!={CALLER_EXCLUDE_SYS_ID}"
@@ -662,7 +666,7 @@ def fetch_historical_signal(as_of: datetime) -> dict:
     dfs_mi = []
     for i, site in enumerate(EMEA_SITES, 1):
         query = (
-            f"location.u_site_name={site}"
+            f"{INCIDENT_REGION_SYSPARM}location.u_site_name={site}"
             f"^priorityIN1,2"
             f"^opened_at>={since_60}"
             f"^opened_at<{as_of_str}"
@@ -687,7 +691,7 @@ def fetch_historical_signal(as_of: datetime) -> dict:
     # Broad fetch: avoid encoded closed_at OR-clauses that can return 0 rows on some instances;
     # "open at snapshot" uses closed_at after fetch (see below).
     task_query = (
-        EMEA_LOCATION_FILTER
+        SC_TASK_LOCATION_FILTER
         + f"^opened_at>={since_730}"
         + f"^opened_at<{as_of_str}"
     )
@@ -911,7 +915,10 @@ def test_incident_fetch(limit: int = 1000, batch_sites: int = 3) -> None:
         dfs = []
         for j, site in enumerate(EMEA_SITES[:batch_sites], 1):
             print(f"    Site {j}/{batch_sites}: {site[:40]}...", end=" ", flush=True)
-            q = f"location.u_site_name={site}^stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+            q = (
+                f"{INCIDENT_REGION_SYSPARM}location.u_site_name={site}"
+                f"^stateNOT IN6,7,8^caller_id!={CALLER_EXCLUDE_SYS_ID}"
+            )
             d = snow_query("incident", q, incident_fields, limit=limit)
             print(f"{len(d):,} records", flush=True)
             if not d.empty and loc_col in d.columns:
@@ -2217,11 +2224,14 @@ def run_shadow_backfill() -> None:
     print(f"{'='*60}\n")
     logger.info("Shadow backfill started")
 
-    global EMEA_SITES, EMEA_LOCATION_FILTER
+    global EMEA_SITES, EMEA_LOCATION_FILTER, SC_TASK_LOCATION_FILTER
     print("Loading EMEA site list...")
     sites = fetch_emea_sites()
     EMEA_SITES = sites["site_names"]
     EMEA_LOCATION_FILTER = "location.nameIN" + sites["location_ids"]
+    SC_TASK_LOCATION_FILTER = (
+        "request_item.u_opened_on_behalf_of.location.nameIN" + sites["location_ids"]
+    )
     print(f"  Active EMEA sites: {sites['count']} (source: {sites['source']})")
 
     print(f"\nSnapshot Wk2 (column C partial): {SHADOW_SNAPSHOT_WK2.isoformat()}")
@@ -2423,10 +2433,13 @@ def main():
 
     # 0. Build EMEA site list dynamically from cmn_location (API primary, CSV fallback)
     print("Loading EMEA site list...")
-    global EMEA_SITES, EMEA_LOCATION_FILTER
+    global EMEA_SITES, EMEA_LOCATION_FILTER, SC_TASK_LOCATION_FILTER
     sites = fetch_emea_sites()
     EMEA_SITES           = sites["site_names"]
     EMEA_LOCATION_FILTER = "location.nameIN" + sites["location_ids"]
+    SC_TASK_LOCATION_FILTER = (
+        "request_item.u_opened_on_behalf_of.location.nameIN" + sites["location_ids"]
+    )
     print(f"  Active EMEA sites: {sites['count']} (source: {sites['source']})")
     logger.info(f"EMEA sites: {sites['count']} physical sites | source: {sites['source']}")
 
