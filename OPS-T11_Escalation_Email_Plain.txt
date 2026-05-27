@@ -1,0 +1,24 @@
+Subject: BREACHED — Problems Without RCA — Recovery Commitment Required — 21 May 2026
+
+To: IT Helpdesk / Problem Management
+From: IT Ops Managers (Proyer / Cazan / Gauthier / S K / Glynn)
+
+OPS-T11 BREACHED: Watch (30-60d): 1 | Breach (60d+): 3.
+
+Four open EMEA problems require RCA but have no root cause documented in ServiceNow (u_root_cause blank), aged >30 days. Three exceed the 60-day breach threshold.
+
+BREACH (60+ days):
+- PRB0051007 | Bucharest - Romania | 199d | Service Restored | P2 - Issues with ZSCALER and AD
+- PRB0051017 | Krakow - Poland | 189d | Root Cause Analysis | P2-Internet issue in Krakow GBS 10682 - urgent
+- PRB0051057 | Gillingham - United Kingdom | 103d | Root Cause Analysis | ClearCase replication recurring across multiple sites
+
+WATCH (30-60 days):
+- PRB0051104 | Izmir - Turkey / ESBAS 2 (PT Phase 1) | 42d | Root Cause Analysis | P2- e-delivery note error to TRA
+
+If unresolved by next weekly run (26 May 2026), escalation advances to EMEA IT Director with formal recovery plan demand.
+
+Recovery commitment required per problem: (1) accountable owner (named individual), (2) committed RCA completion date, (3) remediation actions, (4) next checkpoint date.
+
+Attached: problems_no_rca_emea.csv
+
+Contact: IT Ops Managers — Proyer / Cazan / Gauthier / S K / Glynn

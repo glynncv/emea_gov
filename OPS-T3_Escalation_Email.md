@@ -1,0 +1,138 @@
+# ESCALATION: Catalogue Aging Threshold Breach — OPS-T3 Recovery
+
+**To:** IT Major Incident Management <IT.major.incident.management@phinia.com>  
+**From:** IT Ops Managers (Proyer / Cazan / Gauthier / S K / Glynn)  
+**Date:** 27 April 2026  
+**Severity:** Medium  
+**Status:** Open — Recovery Commitment Requested
+
+---
+
+## IMPACT
+
+| Dimension | Details |
+|-----------|---------|
+| **Threshold Breach** | 83 of 223 active tasks aged >30 days (37.2% vs 10% target) |
+| **Gap to Compliance** | 61 tasks must be closed to meet SLA |
+| **Affected Teams** | 26 assignment groups across EMEA operations |
+| **Geographic Span** | 12 locations (primary: Bucharest, Gillingham, Izmir, Warwick, Krakow) |
+| **SLA Status** | **BREACHED** — threshold exceeded by 3.7x |
+| **Operational Risk** | Service continuity and IT governance compliance at risk |
+
+---
+
+## ISSUE DESCRIPTION
+
+The EMEA Operations catalogue is in breach of the OPS-T3 threshold for consecutive weeks. As of today, 37.2% of active tasks remain unresolved beyond 30 days — nearly four times the 10% target. This indicates systemic backlog accumulation, likely driven by resource constraints, process bottlenecks, or competing priorities across multiple service streams.
+
+**Key concern:** 25 tasks are now 90+ days old, and 39 tasks have been stale (no updates) for 30+ days. This pattern suggests tasks are either blocked, deprioritized, or without assigned ownership.
+
+---
+
+## ROOT CAUSE AREAS (Operational Bottlenecks)
+
+### 1. **EDI Requests — 28 Aged Tasks (33.7% of backlog)**
+- **EDI_SEEBURGER_VENDOR:** 16 tasks
+- **EDI_SEEBURGER_Customer:** 10 tasks
+- **EDI_Support (internal):** 5 tasks  
+**→ Indicates:** Resource constraint or integration blocker on EDI workflows. Needs immediate review of staffing, process handoffs, and vendor/customer dependencies.
+
+### 2. **SAP Requests — 20 Aged Tasks**
+- **SAP_ORDER_FULFILLMENT:** 8 tasks (highest single module)
+- **SAP Generic Requests:** 20 total across FI/CO, P2P, Label Printing, Manufacturing, EAI
+- **→ Indicates:** Distributed issue across multiple SAP modules, suggesting capacity or coordination gap.
+
+### 3. **Access Provisioning (Grafana) — 8 Aged Tasks**
+- All categorized as "Access grafana.ice.phinia.local"
+- **→ Indicates:** Slow approval/provisioning process or security gate bottleneck. Process optimization opportunity.
+
+### 4. **Geographic Hotspots**
+- **Bucharest (15 tasks)** and **Gillingham (15 tasks)** tied for highest concentration
+- **Izmir, Turkey (14 tasks)** — single largest regional cluster
+- **→ Indicates:** Potential regional resource imbalance or staffing gaps.
+
+---
+
+## TASK AGE DISTRIBUTION
+
+| Age Band | Count | % of Aged Tasks |
+|----------|-------|-----------------|
+| 90+ days | 25 | 30.1% |
+| 61–90 days | 19 | 22.9% |
+| 46–60 days | 16 | 19.3% |
+| 31–45 days | 23 | 27.7% |
+
+The top quartile (90+ days) represents significant operational debt and requires immediate triage and unblocking.
+
+---
+
+## STALENESS ASSESSMENT
+
+| Metric | Value |
+|--------|-------|
+| Total aged tasks | 83 |
+| Without updates 14+ days | 56 (67.5%) |
+| Without updates 30+ days | 39 (47%) |
+
+**Interpretation:** Nearly half of aged tasks have received no activity in 30+ days, indicating either:
+- Tasks are blocked waiting for external input/approval
+- Assigned teams have lost context or momentum
+- Tasks are deprioritized and abandoned in the queue
+
+---
+
+## WHAT'S BEEN TRIED
+
+**None.** This is the first formal escalation. IT Ops has identified the breach and is seeking IT Major Incident Management's intervention to unlock recovery.
+
+---
+
+## WHAT'S NEEDED
+
+1. **Root Cause Analysis (Week 1–2)**
+   - Investigate EDI workflow bottlenecks (staffing, dependencies, handoffs)
+   - Review SAP request routing and assignment logic
+   - Assess Grafana access provisioning process
+   - Confirm any external blockers (vendor, customer, third-party delays)
+
+2. **Resource/Capacity Review (Week 2–3)**
+   - Audit assignment group capacity vs. incoming volume
+   - Identify regional staffing gaps (Bucharest, Gillingham, Izmir)
+   - Determine if tasks can be redistributed or prioritized
+
+3. **Recovery Plan (Week 3–4)**
+   - Develop triage strategy for 25 oldest tasks (90+ days)
+   - Identify quick wins (stale tasks ready to close)
+   - Establish daily standup on aged queue until compliance restored
+
+4. **Commitment**
+   - Confirm recovery timeline: reduce aged backlog to <22 tasks (10% target) within **30 days**
+   - Weekly status updates to IT Ops leadership
+
+---
+
+## SUPPORTING DATA
+
+**Attached CSV files contain:**
+- `catalogue_escalation_summary.csv` — Threshold breach summary
+- `catalogue_escalation_age_bands.csv` — Task age distribution
+- `catalogue_escalation_assignment_groups.csv` — Bottleneck areas (26 teams)
+- `catalogue_escalation_cat_items.csv` — Request type breakdown
+- `catalogue_escalation_top_sites.csv` — Geographic distribution
+- `catalogue_escalation_staleness.csv` — Update frequency analysis
+- `catalogue_escalation_detail.csv` — Full task listing with age and staleness metrics
+
+---
+
+## NEXT STEPS
+
+1. **Acknowledge receipt** — confirm IT Major Incident Management can accept this escalation
+2. **Schedule kickoff** — within 2 business days for RCA planning
+3. **Assign owner** — designate incident commander for recovery coordination
+4. **Provide timeline** — confirm 30-day recovery is achievable, or propose adjusted timeline
+
+---
+
+**Contact for questions:**  
+IT Ops Managers — Proyer / Cazan / Gauthier / S K / Glynn
+

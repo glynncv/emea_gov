@@ -81,7 +81,7 @@ logger.addHandler(console_handler)
 # SNOW_USER=your_username
 # SNOW_PASS=your_password
 # COCKPIT_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Cockpit\EMEA_Governance_Cockpit_2026.xlsx
-# EUC_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\EUC_EOSL.xlsx
+# EUC_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\Data\EUC_EOSL.xlsx
 # OT_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\TF Tracker - OT.xlsx
 # SDWAN_PATH=C:\Users\cglynn\OneDrive - PHINIA\My_Development_Projects\EMEA_GOV\Data\TF - SD_WAN.xlsx
 # SNOW_LOCATIONS_PATH=C:\Users\cglynn\OneDrive - PHINIA\Data\EMEA_GOV\SNOW_Exports\Current\PYTHON_EMEA_Locations.csv
@@ -97,11 +97,11 @@ OT_PATH       = os.getenv("OT_PATH", "TF Tracker - OT.xlsx")
 SDWAN_PATH    = os.getenv("SDWAN_PATH", "TF - SD_WAN.xlsx")
 
 # Fallback path for EMEA site list if cmn_location API call fails.
-# Default: SNOW_Exports\Current\PYTHON_EMEA_Locations.csv relative to script directory.
+# Default: PYTHON EMEA Locations.csv next to this script (repo export of active EMEA sites).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SNOW_LOCATIONS_PATH = os.getenv(
     "SNOW_LOCATIONS_PATH",
-    os.path.join(_SCRIPT_DIR, "SNOW_Exports", "Current", "PYTHON_EMEA_Locations.csv")
+    os.path.join(_SCRIPT_DIR, "PYTHON EMEA Locations.csv"),
 )
 
 BASE_URL = f"https://{SNOW_INSTANCE}/api/now/table"
@@ -288,7 +288,7 @@ def fetch_emea_sites() -> dict:
     Fetch the authoritative EMEA physical site list from SNOW cmn_location.
 
     Primary source: REST API query against cmn_location filtered by u_region=EMEA and u_active=true.
-    Fallback: CSV file at SNOW_LOCATIONS_PATH (PYTHON_EMEA_Locations.csv format).
+    Fallback: CSV file at SNOW_LOCATIONS_PATH (same columns as PYTHON EMEA Locations.csv).
 
     Excludes all entries in LOCATION_EXCLUSIONS (cloud, non-physical, external sites).
 
@@ -367,7 +367,7 @@ def fetch_emea_sites() -> dict:
         msg = (
             f"FATAL: cmn_location API failed and fallback CSV not found at:\n"
             f"  {SNOW_LOCATIONS_PATH}\n"
-            f"Export PYTHON_EMEA_Locations.csv from SNOW or set SNOW_LOCATIONS_PATH in .env"
+            f"Export PYTHON EMEA Locations.csv from SNOW or set SNOW_LOCATIONS_PATH in .env"
         )
         print(f"\n  {msg}")
         logger.error(msg)
@@ -1165,17 +1165,17 @@ def age_days(
 def calc_m1_incident_aging(
     incidents: pd.DataFrame, as_of: datetime | None = None
 ) -> dict:
-    """Metric 1: % open incidents aged <= 10 days."""
+    """Metric 1: % open incidents aged <= 10 days (lower is worse — target >= 90%)."""
     if incidents.empty:
         return {"value": None, "note": "No data"}
     incidents = incidents.copy()
     incidents["age_days"] = age_days(incidents, "opened_at", as_of)
-    compliant = (incidents["age_days"] <= 10).sum()
-    total     = len(incidents)
-    pct       = round(compliant / total * 100, 1) if total else 0
+    fresh = (incidents["age_days"] <= 10).sum()
+    total = len(incidents)
+    pct   = round(fresh / total * 100, 1) if total else 0
     return {
         "value": pct,
-        "note":  f"{compliant}/{total} incidents aged <=10 days"
+        "note":  f"{fresh}/{total} incidents aged <=10 days"
     }
 
 
@@ -1447,6 +1447,7 @@ def evaluate_trigger(metric_name: str, current: float,
     extra = extra or {}
 
     if metric_name == "incident_aging":
+        # current = % aged <=10 days (lower is worse — BREACHED when <90% two weeks running)
         if current is not None and current < 90 and prev_week is not None and prev_week < 90:
             return "BREACHED"
         if current is not None and current < 90:
@@ -2016,12 +2017,12 @@ def update_cockpit(
     #                           Escalation Required col, Physics Block 4 row)
     # Calibrated from EMEA_Governance_Cockpit_2026.xlsx on 2026-03-07
     ROW_MAP = {
-        "incident_aging":   {"cv": "B4",  "ts": "F4",  "er": "G4",  "phys_row": 2, "pct": True},
-        "catalogue_aging":  {"cv": "B5",  "ts": "F5",  "er": "G5",  "phys_row": 3, "pct": True},
-        "sla_x2":           {"cv": "B6",  "ts": "F6",  "er": "G6",  "phys_row": 4},
-        "no_movement":      {"cv": "B8",  "ts": "F8",  "er": "G8",  "phys_row": 5},
-        "repeat_mi":        {"cv": "B10", "ts": "F10", "er": "G10", "phys_row": 6},
-        "problems_no_rca":  {"cv": "B11", "ts": "F11", "er": "G11", "phys_row": 7},
+        "incident_aging":   {"cv": "B4",  "ts": "F4",  "er": "G4",  "phys_row": 44, "pct": True},
+        "catalogue_aging":  {"cv": "B5",  "ts": "F5",  "er": "G5",  "phys_row": 45, "pct": True},
+        "sla_x2":           {"cv": "B6",  "ts": "F6",  "er": "G6",  "phys_row": 46},
+        "no_movement":      {"cv": "B8",  "ts": "F8",  "er": "G8",  "phys_row": 47},
+        "repeat_mi":        {"cv": "B10", "ts": "F10", "er": "G10", "phys_row": 48},
+        "problems_no_rca":  {"cv": "B11", "ts": "F11", "er": "G11", "phys_row": 49},
     }
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2262,7 +2263,7 @@ def run_shadow_backfill() -> None:
             logger.error("Shadow backfill aborted — Physics_Engine missing")
             return
         ws_ro = wb_ro["Physics_Engine"]
-        ghost = {"C3": ws_ro["C3"].value, "C5": ws_ro["C5"].value, "C6": ws_ro["C6"].value}
+        ghost = {"C45": ws_ro["C45"].value, "C47": ws_ro["C47"].value, "C48": ws_ro["C48"].value}
     except FileNotFoundError:
         print(f"\n  ERROR: Cockpit not found: {COCKPIT_PATH}")
         logger.error("Shadow backfill aborted — cockpit missing")
@@ -2273,9 +2274,9 @@ def run_shadow_backfill() -> None:
         return
 
     wk2_writes = [
-        ("catalogue_aging", "C3", metrics_wk2["catalogue_aging"].get("value")),
-        ("no_movement", "C5", metrics_wk2["no_movement"].get("value")),
-        ("repeat_mi", "C6", metrics_wk2["repeat_mi"].get("value")),
+        ("catalogue_aging", "C45", metrics_wk2["catalogue_aging"].get("value")),
+        ("no_movement", "C47", metrics_wk2["no_movement"].get("value")),
+        ("repeat_mi", "C48", metrics_wk2["repeat_mi"].get("value")),
     ]
 
     try:
@@ -2316,9 +2317,9 @@ def run_shadow_backfill() -> None:
         "repeat_mi",
         "problems_no_rca",
     ]
-    print("\n  Wk3 full writes (D2–D7):")
+    print("\n  Wk3 full writes (D44–D49):")
     for i, key in enumerate(wk3_order):
-        cell = f"D{2 + i}"
+        cell = f"D{44 + i}"
         raw = metrics_wk3[key].get("value")
         stored = _physics_block4_stored_value(key, raw)
         ws[cell] = stored
